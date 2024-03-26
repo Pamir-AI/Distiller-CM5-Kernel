@@ -22,23 +22,30 @@
 #include <linux/delay.h>
 
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_fbdev_dma.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fb_cma_helper.h>
-#include <drm/drm_fb_helper.h>
+#include <drm/drm_fbdev_dma.h>
+#include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_format_helper.h>
 #include <drm/drm_fourcc.h>
-#include <drm/drm_gem_cma_helper.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_gem.h>
+#include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_mipi_dbi.h>
+#include <drm/drm_print.h>
+#include <drm/drm_probe_helper.h>
 #include <drm/drm_rect.h>
 #include <drm/drm_vblank.h>
 #include <drm/drm_simple_kms_helper.h>
-#include <drm/tinydrm/tinydrm-helpers.h>
 
 #include <uapi/drm/gdepaper_drm.h>
 
 #include <dt-bindings/display/gdepaper.h>
 
+#undef dev_dbg
+#define dev_dbg dev_info
 
 enum gdepaper_cmd {
 	GDEP_CMD_PANEL_SETUP = 0x00,
@@ -102,13 +109,20 @@ enum gdepaper_col_ch {
 
 
 struct gdepaper {
+// replace by dbidev.drm
 	struct drm_device drm;
+// replace by dbidev.pip
 	struct drm_simple_display_pipe pipe;
+// replace by dbidev.dbi.spi
 	struct spi_device *spi;
 
+// replace by dbidev.dbi.reset
 	struct gpio_desc *reset;
+// replace by dbidev.dbi.dc
 	struct gpio_desc *dc;
 	struct gpio_desc *busy;
+
+	struct mipi_dbi_dev dbidev;
 
 	u8 *tx_buf; /* FIXME initialize this */
 	bool enabled;
@@ -139,6 +153,408 @@ struct gdepaper_type_descriptor {
 static inline struct gdepaper *drm_to_gdepaper(struct drm_device *drm)
 {
 	return container_of(drm, struct gdepaper, drm);
+}
+
+static inline bool tinydrm_machine_little_endian(void)
+{
+#if defined(__LITTLE_ENDIAN)
+	return true;
+#else
+	return false;
+#endif
+}
+
+#ifdef DEBUG
+/**
+ * tinydrm_dbg_spi_message - Dump SPI message
+ * @spi: SPI device
+ * @m: SPI message
+ *
+ * Dumps info about the transfers in a SPI message including buffer content.
+ * DEBUG has to be defined for this function to be enabled alongside setting
+ * the DRM_UT_DRIVER bit of &__drm_debug.
+ */
+static inline void tinydrm_dbg_spi_message(struct spi_device *spi,
+					   struct spi_message *m)
+{
+	if (__drm_debug & DRM_UT_DRIVER)
+		_tinydrm_dbg_spi_message(spi, m);
+}
+#else
+static inline void tinydrm_dbg_spi_message(struct spi_device *spi,
+					   struct spi_message *m)
+{
+}
+#endif /* DEBUG */
+
+/* stuff removed from v5.4 (still was in v5.3.18 in tinydrm/core) */
+
+struct tinydrm_connector {
+	struct drm_connector base;
+	struct drm_display_mode mode;
+};
+
+static inline struct tinydrm_connector *
+to_tinydrm_connector(struct drm_connector *connector)
+{
+	return container_of(connector, struct tinydrm_connector, base);
+}
+
+static int tinydrm_connector_get_modes(struct drm_connector *connector)
+{
+	struct tinydrm_connector *tconn = to_tinydrm_connector(connector);
+	struct drm_display_mode *mode;
+
+	mode = drm_mode_duplicate(connector->dev, &tconn->mode);
+	if (!mode) {
+		DRM_ERROR("Failed to duplicate mode\n");
+		return 0;
+	}
+
+	if (mode->name[0] == '\0')
+		drm_mode_set_name(mode);
+
+	mode->type |= DRM_MODE_TYPE_PREFERRED;
+	drm_mode_probed_add(connector, mode);
+
+	if (mode->width_mm) {
+		connector->display_info.width_mm = mode->width_mm;
+		connector->display_info.height_mm = mode->height_mm;
+	}
+
+	return 1;
+}
+
+static const struct drm_connector_helper_funcs tinydrm_connector_hfuncs = {
+	.get_modes = tinydrm_connector_get_modes,
+};
+
+static enum drm_connector_status
+tinydrm_connector_detect(struct drm_connector *connector, bool force)
+{
+	if (drm_dev_is_unplugged(connector->dev))
+		return connector_status_disconnected;
+
+	return connector->status;
+}
+
+static void tinydrm_connector_destroy(struct drm_connector *connector)
+{
+	struct tinydrm_connector *tconn = to_tinydrm_connector(connector);
+
+	drm_connector_cleanup(connector);
+	kfree(tconn);
+}
+
+static const struct drm_connector_funcs tinydrm_connector_funcs = {
+	.reset = drm_atomic_helper_connector_reset,
+	.detect = tinydrm_connector_detect,
+	.fill_modes = drm_helper_probe_single_connector_modes,
+	.destroy = tinydrm_connector_destroy,
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
+};
+
+static struct drm_connector *
+tinydrm_connector_create(struct drm_device *drm,
+			 const struct drm_display_mode *mode,
+			 int connector_type)
+{
+	struct tinydrm_connector *tconn;
+	struct drm_connector *connector;
+	int ret;
+
+	tconn = kzalloc(sizeof(*tconn), GFP_KERNEL);
+	if (!tconn)
+		return ERR_PTR(-ENOMEM);
+
+	drm_mode_copy(&tconn->mode, mode);
+	connector = &tconn->base;
+
+	drm_connector_helper_add(connector, &tinydrm_connector_hfuncs);
+	ret = drm_connector_init(drm, connector, &tinydrm_connector_funcs,
+				 connector_type);
+	if (ret) {
+		kfree(tconn);
+		return ERR_PTR(ret);
+	}
+
+	connector->status = connector_status_connected;
+
+	return connector;
+}
+
+static int tinydrm_rotate_mode(struct drm_display_mode *mode,
+			       unsigned int rotation)
+{
+	if (rotation == 0 || rotation == 180) {
+		return 0;
+	} else if (rotation == 90 || rotation == 270) {
+		swap(mode->hdisplay, mode->vdisplay);
+		swap(mode->hsync_start, mode->vsync_start);
+		swap(mode->hsync_end, mode->vsync_end);
+		swap(mode->htotal, mode->vtotal);
+		swap(mode->width_mm, mode->height_mm);
+		return 0;
+	} else {
+		return -EINVAL;
+	}
+}
+
+/**
+ * drm_format_plane_cpp - determine the bytes per pixel value
+ * @format: pixel format (DRM_FORMAT_*)
+ * @plane: plane index
+ *
+ * Returns:
+ * The bytes per pixel value for the specified plane.
+ */
+static int drm_format_plane_cpp(uint32_t format, int plane)
+{
+	const struct drm_format_info *info;
+
+	info = drm_format_info(format);
+	if (!info || plane >= info->num_planes)
+		return 0;
+
+	return info->cpp[plane];
+}
+
+#define DRIVER_PRIME	BIT(2)	// not made use of anywhere
+
+/**
+ * tinydrm_display_pipe_init - Initialize display pipe
+ * @drm: DRM device
+ * @pipe: Display pipe
+ * @funcs: Display pipe functions
+ * @connector_type: Connector type
+ * @formats: Array of supported formats (DRM_FORMAT\_\*)
+ * @format_count: Number of elements in @formats
+ * @mode: Supported mode
+ * @rotation: Initial @mode rotation in degrees Counter Clock Wise
+ *
+ * This function sets up a &drm_simple_display_pipe with a &drm_connector that
+ * has one fixed &drm_display_mode which is rotated according to @rotation.
+ *
+ * Returns:
+ * Zero on success, negative error code on failure.
+ */
+static int tinydrm_display_pipe_init(struct drm_device *drm,
+			      struct drm_simple_display_pipe *pipe,
+			      const struct drm_simple_display_pipe_funcs *funcs,
+			      int connector_type,
+			      const uint32_t *formats,
+			      unsigned int format_count,
+			      const struct drm_display_mode *mode,
+			      unsigned int rotation)
+{
+	struct drm_display_mode mode_copy;
+	struct drm_connector *connector;
+	int ret;
+	static const uint64_t modifiers[] = {
+		DRM_FORMAT_MOD_LINEAR,
+		DRM_FORMAT_MOD_INVALID
+	};
+
+	drm_mode_copy(&mode_copy, mode);
+	ret = tinydrm_rotate_mode(&mode_copy, rotation);
+	if (ret) {
+		DRM_ERROR("Illegal rotation value %u\n", rotation);
+		return -EINVAL;
+	}
+
+	drm->mode_config.min_width = mode_copy.hdisplay;
+	drm->mode_config.max_width = mode_copy.hdisplay;
+	drm->mode_config.min_height = mode_copy.vdisplay;
+	drm->mode_config.max_height = mode_copy.vdisplay;
+
+	connector = tinydrm_connector_create(drm, &mode_copy, connector_type);
+	if (IS_ERR(connector))
+		return PTR_ERR(connector);
+
+	return drm_simple_display_pipe_init(drm, pipe, funcs, formats,
+					    format_count, modifiers, connector);
+}
+
+static unsigned int spi_max;
+module_param(spi_max, uint, 0400);
+MODULE_PARM_DESC(spi_max, "Set a lower SPI max transfer size");
+
+/**
+ * tinydrm_spi_max_transfer_size - Determine max SPI transfer size
+ * @spi: SPI device
+ * @max_len: Maximum buffer size needed (optional)
+ *
+ * This function returns the maximum size to use for SPI transfers. It checks
+ * the SPI master, the optional @max_len and the module parameter spi_max and
+ * returns the smallest.
+ *
+ * Returns:
+ * Maximum size for SPI transfers
+ */
+static size_t tinydrm_spi_max_transfer_size(struct spi_device *spi, size_t max_len)
+{
+	size_t ret;
+
+	ret = min(spi_max_transfer_size(spi), spi->controller->max_dma_len);
+	if (max_len)
+		ret = min(ret, max_len);
+	if (spi_max)
+		ret = min_t(size_t, ret, spi_max);
+	ret &= ~0x3;
+	if (ret < 4)
+		ret = 4;
+
+	return ret;
+}
+
+/**
+ * tinydrm_spi_bpw_supported - Check if bits per word is supported
+ * @spi: SPI device
+ * @bpw: Bits per word
+ *
+ * This function checks to see if the SPI master driver supports @bpw.
+ *
+ * Returns:
+ * True if @bpw is supported, false otherwise.
+ */
+static bool tinydrm_spi_bpw_supported(struct spi_device *spi, u8 bpw)
+{
+	u32 bpw_mask = spi->controller->bits_per_word_mask;
+
+	if (bpw == 8)
+		return true;
+
+	if (!bpw_mask) {
+		dev_warn_once(&spi->dev,
+			      "bits_per_word_mask not set, assume 8-bit only\n");
+		return false;
+	}
+
+	if (bpw_mask & SPI_BPW_MASK(bpw))
+		return true;
+
+	return false;
+}
+
+#ifdef DEBUG
+
+static void
+tinydrm_dbg_spi_print(struct spi_device *spi, struct spi_transfer *tr,
+		      const void *buf, int idx, bool tx)
+{
+	u32 speed_hz = tr->speed_hz ? tr->speed_hz : spi->max_speed_hz;
+	char linebuf[3 * 32];
+
+	hex_dump_to_buffer(buf, tr->len, 16,
+			   DIV_ROUND_UP(tr->bits_per_word, 8),
+			   linebuf, sizeof(linebuf), false);
+
+	printk(KERN_DEBUG
+	       "    tr(%i): speed=%u%s, bpw=%i, len=%u, %s_buf=[%s%s]\n", idx,
+	       speed_hz > 1000000 ? speed_hz / 1000000 : speed_hz / 1000,
+	       speed_hz > 1000000 ? "MHz" : "kHz", tr->bits_per_word, tr->len,
+	       tx ? "tx" : "rx", linebuf, tr->len > 16 ? " ..." : "");
+}
+
+/* called through tinydrm_dbg_spi_message() */
+static void _tinydrm_dbg_spi_message(struct spi_device *spi, struct spi_message *m)
+{
+	struct spi_transfer *tmp;
+	int i = 0;
+
+	list_for_each_entry(tmp, &m->transfers, transfer_list) {
+
+		if (tmp->tx_buf)
+			tinydrm_dbg_spi_print(spi, tmp, tmp->tx_buf, i, true);
+		if (tmp->rx_buf)
+			tinydrm_dbg_spi_print(spi, tmp, tmp->rx_buf, i, false);
+		i++;
+	}
+}
+#endif
+
+/**
+ * tinydrm_spi_transfer - SPI transfer helper
+ * @spi: SPI device
+ * @speed_hz: Override speed (optional)
+ * @header: Optional header transfer
+ * @bpw: Bits per word
+ * @buf: Buffer to transfer
+ * @len: Buffer length
+ *
+ * This SPI transfer helper breaks up the transfer of @buf into chunks which
+ * the SPI master driver can handle. If the machine is Little Endian and the
+ * SPI master driver doesn't support 16 bits per word, it swaps the bytes and
+ * does a 8-bit transfer.
+ * If @header is set, it is prepended to each SPI message.
+ *
+ * Returns:
+ * Zero on success, negative error code on failure.
+ */
+static int tinydrm_spi_transfer(struct spi_device *spi, u32 speed_hz,
+			 struct spi_transfer *header, u8 bpw, const void *buf,
+			 size_t len)
+{
+	struct spi_transfer tr = {
+		.bits_per_word = bpw,
+		.speed_hz = speed_hz,
+	};
+	struct spi_message m;
+	u16 *swap_buf = NULL;
+	size_t max_chunk;
+	size_t chunk;
+	int ret = 0;
+
+	if (WARN_ON_ONCE(bpw != 8 && bpw != 16))
+		return -EINVAL;
+
+	max_chunk = tinydrm_spi_max_transfer_size(spi, 0);
+
+	if (__drm_debug & DRM_UT_DRIVER)
+		pr_debug("[drm:%s] bpw=%u, max_chunk=%zu, transfers:\n",
+			 __func__, bpw, max_chunk);
+
+	if (bpw == 16 && !tinydrm_spi_bpw_supported(spi, 16)) {
+		tr.bits_per_word = 8;
+		if (tinydrm_machine_little_endian()) {
+			swap_buf = kmalloc(min(len, max_chunk), GFP_KERNEL);
+			if (!swap_buf)
+				return -ENOMEM;
+		}
+	}
+
+	spi_message_init(&m);
+	if (header)
+		spi_message_add_tail(header, &m);
+	spi_message_add_tail(&tr, &m);
+
+	while (len) {
+		chunk = min(len, max_chunk);
+
+		tr.tx_buf = buf;
+		tr.len = chunk;
+
+		if (swap_buf) {
+			const u16 *buf16 = buf;
+			unsigned int i;
+
+			for (i = 0; i < chunk / 2; i++)
+				swap_buf[i] = swab16(buf16[i]);
+
+			tr.tx_buf = swap_buf;
+		}
+
+		buf += chunk;
+		len -= chunk;
+
+		tinydrm_dbg_spi_message(spi, &m);
+		ret = spi_sync(spi, &m);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static int gdepaper_spi_transfer_cstoggle(struct gdepaper *epap, u8 *data,
@@ -323,20 +739,15 @@ static int gdepaper_txbuf_pack(u8 *dst,
 				struct drm_rect *clip,
 				enum gdepaper_col_ch col)
 {
-	struct drm_gem_cma_object *cma_obj = drm_fb_cma_get_gem_obj(fb, 0);
-	struct dma_buf_attachment *import_attach = cma_obj->base.import_attach;
-	struct drm_format_name_buf format_name;
+	struct drm_gem_dma_object *dma_obj = drm_fb_dma_get_gem_obj(fb, 0);
 	int ret = 0;
-	void *vaddr = cma_obj->vaddr;
+	void *vaddr = dma_obj->vaddr;
 	size_t len = (clip->x2 - clip->x1);
 	unsigned int y, lines = clip->y2 - clip->y1;
 
-	if (import_attach) {
-		ret = dma_buf_begin_cpu_access(import_attach->dmabuf,
-					       DMA_FROM_DEVICE);
-		if (ret)
-			return ret;
-	}
+	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
+	if (ret)
+		return ret;
 
 	vaddr += clip->y1 * fb->pitches[0] +
 		clip->x1 * drm_format_plane_cpp(fb->format->format, 0);
@@ -359,18 +770,12 @@ static int gdepaper_txbuf_pack(u8 *dst,
 		break;
 
 	default:
-		dev_err_once(fb->dev->dev, "Format is not supported: %s\n",
-			     drm_get_format_name(fb->format->format,
-						 &format_name));
+		dev_err_once(fb->dev->dev, "Format is not supported: %p4cc\n",
+			     &fb->format->format);
 		return -EINVAL;
 	}
 
-	if (import_attach) {
-		ret = dma_buf_end_cpu_access(import_attach->dmabuf,
-					     DMA_FROM_DEVICE);
-		if (ret)
-			return ret;
-	}
+	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
 
 	return len*lines/8;
 }
@@ -408,7 +813,7 @@ static int gdepaper_partial_cmd(struct gdepaper *epap, struct drm_rect *rect,
 	return gdepaper_spi_transfer_cstoggle(epap, buf, len);
 }
 
-int gdepaper_config_refresh(struct gdepaper *epap)
+static int gdepaper_config_refresh(struct gdepaper *epap)
 {
 	struct device *dev = epap->drm.dev;
 	int ret = 0;
@@ -892,15 +1297,20 @@ static struct drm_display_mode *gdepaper_of_read_mode(
 }
 
 static const struct drm_simple_display_pipe_funcs gdepaper_pipe_funcs = {
-	.enable		= gdepaper_pipe_enable,
-	.disable	= gdepaper_pipe_disable,
-	.update		= gdepaper_pipe_update,
-	.prepare_fb	= drm_gem_fb_simple_display_pipe_prepare_fb,
+	.enable = gdepaper_pipe_enable,
+	.disable = gdepaper_pipe_disable,
+	.update	= gdepaper_pipe_update,
+	.mode_valid = mipi_dbi_pipe_mode_valid,
+	.begin_fb_access = mipi_dbi_pipe_begin_fb_access,
+	.end_fb_access = mipi_dbi_pipe_end_fb_access,
+	.reset_plane = mipi_dbi_pipe_reset_plane,
+	.duplicate_plane_state = mipi_dbi_pipe_duplicate_plane_state,
+	.destroy_plane_state = mipi_dbi_pipe_destroy_plane_state
 };
 
-DEFINE_DRM_GEM_CMA_FOPS(gdepaper_fops);
+DEFINE_DRM_GEM_DMA_FOPS(gdepaper_fops);
 
-int gdepaper_force_full_refresh_ioctl(struct drm_device *drm_dev, void *data,
+static int gdepaper_force_full_refresh_ioctl(struct drm_device *drm_dev, void *data,
 		struct drm_file *file)
 {
 	struct gdepaper *epap = drm_to_gdepaper(drm_dev);
@@ -923,7 +1333,7 @@ out:
 	return ret;
 }
 
-int gdepaper_get_refresh_params_ioctl(struct drm_device *drm_dev, void *data,
+static int gdepaper_get_refresh_params_ioctl(struct drm_device *drm_dev, void *data,
 		struct drm_file *file)
 {
 	struct gdepaper *epap = drm_to_gdepaper(drm_dev);
@@ -931,7 +1341,7 @@ int gdepaper_get_refresh_params_ioctl(struct drm_device *drm_dev, void *data,
 	return copy_to_user(data, &epap->rfp, sizeof(epap->rfp));
 }
 
-int gdepaper_set_refresh_params_ioctl(struct drm_device *drm_dev, void *data,
+static int gdepaper_set_refresh_params_ioctl(struct drm_device *drm_dev, void *data,
 		struct drm_file *file)
 {
 	struct gdepaper *epap = drm_to_gdepaper(drm_dev);
@@ -959,7 +1369,7 @@ err_out:
 	return ret;
 }
 
-int gdepaper_set_partial_update_en_ioctl(struct drm_device *drm_dev,
+static int gdepaper_set_partial_update_en_ioctl(struct drm_device *drm_dev,
 		void *data, struct drm_file *file)
 {
 	struct gdepaper *epap = drm_to_gdepaper(drm_dev);
@@ -989,7 +1399,7 @@ static void gdepaper_release(struct drm_device *drm)
 	struct gdepaper *epap = drm_to_gdepaper(drm);
 
 	drm_mode_config_cleanup(drm);
-	drm_dev_fini(drm);
+//	drm_dev_fini(drm);
 	kfree(epap);
 }
 
@@ -998,7 +1408,7 @@ static struct drm_driver gdepaper_driver = {
 				  DRIVER_ATOMIC,
 	.fops			= &gdepaper_fops,
 	.release		= gdepaper_release,
-	DRM_GEM_CMA_VMAP_DRIVER_OPS,
+	DRM_GEM_DMA_DRIVER_OPS_VMAP_WITH_DUMB_CREATE(drm_gem_dma_dumb_create),
 	.name			= "gdepaper",
 	.desc			= "Good Display ePaper panel",
 	.date			= "20190715",
@@ -1023,16 +1433,16 @@ static const struct drm_mode_config_funcs gdepaper_dbi_mode_config_funcs = {
 MODULE_DEVICE_TABLE(of, gdepaper_of_match);
 
 static const struct spi_device_id gdepaper_spi_id[] = {
-	{"epaper", 0},
+	{"gooddisplay,generic_epaper", 0},
 	{}
 };
 MODULE_DEVICE_TABLE(spi, gdepaper_spi_id);
 
 static int gdepaper_probe(struct spi_device *spi)
 {
+#if 0	// OLD
 	struct device *dev = &spi->dev;
 	struct device_node *np = dev->of_node;
-	const struct of_device_id *of_id;
 	struct drm_device *drm;
 	struct drm_display_mode *mode;
 	struct gdepaper *epap;
@@ -1040,17 +1450,63 @@ static int gdepaper_probe(struct spi_device *spi)
 	int ret;
 	size_t bufsize;
 
+	struct mipi_dbi *dbi;
+//	const struct spi_device_id *id = spi_get_device_id(spi);
+#endif
+	struct device *dev = &spi->dev;
+	struct device_node *np = dev->of_node;
+	const struct of_device_id *of_id;
+	struct mipi_dbi_dev *dbidev;
+	struct drm_device *drm;
+	struct gdepaper *epap;
+	u32 rotation = 0;
+	int ret;
+
+	struct drm_display_mode *mode;
+	const struct gdepaper_type_descriptor *type_desc;
+	size_t bufsize;
+
+printk("%s\n", __func__);
+
 	of_id = of_match_node(gdepaper_of_match, np);
 	if (WARN_ON(of_id == NULL)) {
 		dev_warn(dev, "dt node didn't match, aborting probe\n");
 		return -EINVAL;
 	}
-	type_desc = of_id->data;
 
-	dev_dbg(dev, "Probing gdepaper module\n");
-	epap = kzalloc(sizeof(*epap), GFP_KERNEL);
-	if (!epap)
-		return -ENOMEM;
+	epap = devm_drm_dev_alloc(dev, &gdepaper_driver,
+				    struct gdepaper, drm);
+	if (IS_ERR(dbidev))
+		return PTR_ERR(dbidev);
+
+	dbidev = &epap->dbidev;
+	drm = &dbidev->drm;
+
+#if 0
+	dbi = &dbidev->dbi;
+	dbi->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(dbi->reset)) {
+		DRM_DEV_ERROR(dev, "Failed to get gpio 'reset'\n");
+		return PTR_ERR(dbi->reset);
+	}
+#endif
+#if 0
+// what is rs?
+	rs = devm_gpiod_get(dev, "rs", GPIOD_OUT_LOW);
+	if (IS_ERR(rs)) {
+		DRM_DEV_ERROR(dev, "Failed to get gpio 'rs'\n");
+		return PTR_ERR(rs);
+	}
+#endif
+#if 0
+	ret = mipi_dbi_spi_init(spi, dbi, rs);
+	if (ret)
+		return ret;
+#endif
+
+	epap->spi_speed_hz = 2000000;
+
+	type_desc = of_id->data;
 
 	epap->enabled = false;
 	mutex_init(&epap->cmdlock);
@@ -1058,12 +1514,13 @@ static int gdepaper_probe(struct spi_device *spi)
 	epap->spi = spi;
 
 	drm = &epap->drm;
+#if 0
 	ret = devm_drm_dev_init(dev, drm, &gdepaper_driver);
 	if (ret) {
 		dev_warn(dev, "failed to init drm dev\n");
 		goto err_free;
 	}
-
+#endif
 	drm_mode_config_init(drm);
 
 	epap->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
@@ -1087,7 +1544,8 @@ static int gdepaper_probe(struct spi_device *spi)
 		goto err_free;
 	}
 
-	epap->spi_speed_hz = 2000000;
+	device_property_read_u32(dev, "rotation", &rotation);
+
 	epap->pll_div = 1;
 	epap->framerate_mHz = 81850;
 	epap->rfp.vg_lv = GDEP_PWR_VGHL_16V;
@@ -1164,7 +1622,7 @@ static int gdepaper_probe(struct spi_device *spi)
 	/* (from mipi-dbi.c:)
 	 * Even though it's not the SPI device that does DMA (the master does),
 	 * the dma mask is necessary for the dma_alloc_wc() in
-	 * drm_gem_cma_create(). The dma_addr returned will be a physical
+	 * drm_gem_dma_create(). The dma_addr returned will be a physical
 	 * address which might be different from the bus address, but this is
 	 * not a problem since the address will not be used.
 	 * The virtual address is used in the transfer and the SPI core
@@ -1216,24 +1674,22 @@ static int gdepaper_probe(struct spi_device *spi)
 	}
 
 	spi_set_drvdata(spi, drm);
-	drm_fbdev_generic_setup(drm, 0);
+	drm_fbdev_dma_setup(drm, 0);
 
 	dev_dbg(dev, "Probed gdepaper module\n");
 	return 0;
 err_free:
-	kfree(epap);
+//	kfree(epap);
 	return ret;
 }
 
-static int gdepaper_remove(struct spi_device *spi)
+static void gdepaper_remove(struct spi_device *spi)
 {
 	struct drm_device *drm = spi_get_drvdata(spi);
 
 	dev_dbg(drm->dev, "Removing gdepaper module\n");
 	drm_dev_unplug(drm);
 	drm_atomic_helper_shutdown(drm);
-
-	return 0;
 }
 
 static void gdepaper_shutdown(struct spi_device *spi)
