@@ -75,6 +75,7 @@ DEF_EPD_TYPE(gdew029t5,       GDEPAPER_COL_BW,         67,  29,  296, 128); /*  
 DEF_EPD_TYPE(gdeh029d56lt,    GDEPAPER_COL_BW,         67,  29,  296, 128); /*    2.9"     b/w                */
 DEF_EPD_TYPE(gdew029i6f,      GDEPAPER_COL_BW,         67,  29,  296, 128); /*    2.9"     b/w                */
 DEF_EPD_TYPE(gdew0371w7,      GDEPAPER_COL_BW,         82,  47,  416, 240); /*    3.71"    b/w    GP8102      */
+DEF_EPD_TYPE(gdey037t03,      GDEPAPER_COL_BW,         82,  47,  416, 240); /*    3.71"    b/w    UC8253      */
 DEF_EPD_TYPE(gdew042t2,       GDEPAPER_COL_BW,         83,  64,  400, 300); /*    4.2"     b/w    IL0398      */
 DEF_EPD_TYPE(gdep043zf3,      GDEPAPER_COL_BW,         56,  94,  800, 480); /*    4.3"     b/w                */
 DEF_EPD_TYPE(gde043a2t,       GDEPAPER_COL_BW,         88,  66,  800, 600); /*    4.3"     b/w                */
@@ -141,6 +142,7 @@ static const struct of_device_id gdepaper_of_match[] = {
 	EPD_OF_ENTRY(gdeh029d56lt),
 	EPD_OF_ENTRY(gdew029i6f),
 	EPD_OF_ENTRY(gdew0371w7),
+	EPD_OF_ENTRY(gdey037t03),
 	EPD_OF_ENTRY(gdew042t2),
 	EPD_OF_ENTRY(gdep043zf3),
 	EPD_OF_ENTRY(gde043a2t),
