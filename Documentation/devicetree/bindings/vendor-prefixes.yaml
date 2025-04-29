@@ -1136,6 +1136,8 @@ patternProperties:
     description: Oxford Semiconductor, Ltd.
   "^ozzmaker,.*":
     description: OzzMaker
+  "^pamir-ai,.*":
+    description: PamirAI, Inc.
   "^panasonic,.*":
     description: Panasonic Corporation
   "^parade,.*":
