@@ -233,6 +233,26 @@ static struct snd_rpi_simple_drvdata drvdata_googlevoicehat = {
 	.dai       = snd_googlevoicehat_soundcard_dai,
 };
 
+SND_SOC_DAILINK_DEFS(pamir_ai,
+	DAILINK_COMP_ARRAY(COMP_EMPTY()),
+	DAILINK_COMP_ARRAY(COMP_CODEC("pamir-ai-soundcard", "pamir-ai-hifi")),
+	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+
+static struct snd_soc_dai_link snd_pamir_ai_soundcard_dai[] = {
+{
+	.name           = "Pamir AI SoundCard",
+	.stream_name    = "Pamir AI SoundCard HiFi",
+	.dai_fmt        =  SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
+				SND_SOC_DAIFMT_CBS_CFS,
+	SND_SOC_DAILINK_REG(pamir_ai),
+},
+};
+
+static struct snd_rpi_simple_drvdata drvdata_pamir_ai = {
+	.card_name = "snd_rpi_pamir_ai_soundcard",
+	.dai       = snd_pamir_ai_soundcard_dai,
+};
+
 SND_SOC_DAILINK_DEFS(hifiberry_dacplusdsp,
 	DAILINK_COMP_ARRAY(COMP_EMPTY()),
 	DAILINK_COMP_ARRAY(COMP_CODEC("dacplusdsp-codec", "dacplusdsp-hifi")),
@@ -508,6 +528,8 @@ static const struct of_device_id snd_rpi_simple_of_match[] = {
 		.data = (void *) &drvdata_adau1977 },
 	{ .compatible = "googlevoicehat,googlevoicehat-soundcard",
 		.data = (void *) &drvdata_googlevoicehat },
+	{ .compatible = "pamir-ai,soundcard",
+		.data = (void *) &drvdata_pamir_ai },
 	{ .compatible = "hifiberrydacplusdsp,hifiberrydacplusdsp-soundcard",
 		.data = (void *) &drvdata_hifiberrydacplusdsp },
 	{ .compatible = "hifiberry,hifiberry-adc8x",

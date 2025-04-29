@@ -17,6 +17,10 @@ obj-$(CONFIG_SND_BCM63XX_I2S_WHISTLER) += snd-soc-63xx.o
 # Google voiceHAT custom codec support
 snd-soc-googlevoicehat-codec-objs := googlevoicehat-codec.o
 
+# Pamir AI custom codec support
+snd-soc-pamir-ai-soundcard-objs := pamir-ai-soundcard.o
+snd-soc-pamir-ai-sound-objs := pamir-ai-sound.o
+
 # BCM2708 Machine Support
 snd-soc-hifiberry-adc-objs := hifiberry_adc.o
 snd-soc-hifiberry-dacplus-objs := hifiberry_dacplus.o
@@ -84,3 +88,4 @@ obj-$(CONFIG_SND_RPI_WM8804_SOUNDCARD) += snd-soc-rpi-wm8804-soundcard.o
 obj-$(CONFIG_SND_BCM2708_SOC_PIFI_40) += snd-soc-pifi-40.o
 obj-$(CONFIG_SND_BCM2708_SOC_CHIPDIP_DAC) += snd-soc-chipdip-dac.o
 obj-$(CONFIG_SND_DACBERRY400) += snd-soc-dacberry400.o
+obj-$(CONFIG_SND_BCM2708_SOC_PAMIR_AI_SOUNDCARD) += snd-soc-pamir-ai-soundcard.o snd-soc-pamir-ai-sound.o
