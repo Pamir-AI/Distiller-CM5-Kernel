@@ -9,8 +9,10 @@ snd-ak4117-y := ak4117.o
 snd-ak4113-y := ak4113.o
 snd-ak4xxx-adda-y := ak4xxx-adda.o
 snd-pt2258-y := pt2258.o
+snd-pamir-ai-sound-y := pamir-ai-sound.o
 
 # Module Dependency
 obj-$(CONFIG_SND_PDAUDIOCF) += snd-ak4117.o
 obj-$(CONFIG_SND_ICE1712) += snd-ak4xxx-adda.o
 obj-$(CONFIG_SND_ICE1724) += snd-ak4114.o snd-ak4113.o snd-ak4xxx-adda.o snd-pt2258.o
+obj-$(CONFIG_SND_BCM2708_SOC_PAMIR_AI_SOUNDCARD) += snd-pamir-ai-sound.o
