@@ -1,0 +1,64 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&i2s_clk_producer>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <&gpio>;
+		__overlay__ {
+            		gpio26_output: gpio26_output {
+                		brcm,pins = <26>;
+                		brcm,function = <1>; /* 1 = output */
+                		brcm,pull = <0>; /* No pull-up/pull-down */
+                		output-high; /* Set initial state to high */
+            		};
+		};
+	};
+
+
+	fragment@2 {
+		target-path = "/";
+		__overlay__ {
+			pamir-ai-soundcard {
+				#sound-dai-cells = <0>;
+				compatible = "pamir-ai,soundcard";
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@3 {
+		target = <&sound>;
+		__overlay__ {
+			compatible = "pamir-ai,soundcard";
+			i2s-controller = <&i2s_clk_producer>;
+			status = "okay";
+		};
+	};
+
+	fragment@4 {
+        	target = <&i2c_arm>;
+
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			pamir_ai_sound: pamir-ai-sound@18 {
+				reg = <0x18>;
+				compatible = "pamir-ai,sound";
+				pinctrl-names = "default";
+				pinctrl-0 = <&gpio26_output>;
+				status = "okay";
+			};
+		};
+	};
+};
