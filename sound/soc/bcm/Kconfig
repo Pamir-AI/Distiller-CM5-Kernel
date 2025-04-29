@@ -32,6 +32,12 @@ config SND_BCM2708_SOC_CHIPDIP_DAC
          help
           Say Y or M if you want to add support for the ChipDip DAC soundcard
 
+config SND_BCM2708_SOC_PAMIR_AI_SOUNDCARD
+	tristate "Support for Pamir AI soundcard"
+	select SND_RPI_SIMPLE_SOUNDCARD
+	help
+          Say Y or M if you want to add support for Pamir AI dummy soundcard.
+
 config SND_BCM2708_SOC_GOOGLEVOICEHAT_SOUNDCARD
 	tristate "Support for Google voiceHAT soundcard"
 	select SND_SOC_VOICEHAT
