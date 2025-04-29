@@ -167,6 +167,19 @@ config INPUT_E3X0_BUTTON
 	  To compile this driver as a module, choose M here: the
 	  module will be called e3x0_button.
 
+config INPUT_PAMIR_KEYINPUT
+	tristate "Pamir Key Input driver for RP2040 via UART"
+	depends on SERIAL_DEV_BUS
+	default y
+	help
+	  Say Y here if you want to use the Pamir Key Input driver for
+	  receiving button events from an RP2040 microcontroller via UART.
+	  This driver is designed for Raspberry Pi CM5 module with an
+	  RP2040 connected to UART2 (ttyAMA2).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called pamir-keyinput.
+
 config INPUT_PCSPKR
 	tristate "PC Speaker support"
 	depends on PCSPKR_PLATFORM
