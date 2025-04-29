@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/pamir-ai-soundcard.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Pamir AI Sound Card Device Tree Bindings
+
+maintainers:
+  - Utsav Balar <utsavbalar1231@gmail.com>
+
+description: |
+  This binding describes the Pamir AI sound card solution which consists of
+  a dummy sound card and an I2C-connected TLV320AIC3204 audio codec.
+
+properties:
+  compatible:
+    enum:
+      - pamir-ai,dummy_soundcard
+      - pamir-ai,soundcard
+
+  "#sound-dai-cells":
+    const: 0
+    description: Number of DAI cells, should be 0
+
+  i2s-controller:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: phandle to the I2S controller
+
+  status:
+    enum:
+      - okay
+      - disabled
+
+required:
+  - compatible
+  - status
+
+additionalProperties: false
+
+examples:
+  - |
+    / {
+      pamir-ai-soundcard {
+        #sound-dai-cells = <0>;
+        compatible = "pamir-ai,dummy_soundcard";
+        status = "okay";
+      };
+    };
+
+    &sound {
+      compatible = "pamir-ai,soundcard";
+      i2s-controller = <&i2s_clk_producer>;
+      status = "okay";
+    }; 
