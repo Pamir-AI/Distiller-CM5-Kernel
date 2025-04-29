@@ -355,8 +355,12 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	wifimac.dtbo \
 	wittypi.dtbo \
 	wm8960-soundcard.dtbo \
+	ws2812-pio.dtbo \
 	pamir-ai-eink.dtbo \
-	pamir-ai-eink2.dtbo
+	pamir-ai-eink2.dtbo \
+	pamir-ai-soundcard.dtbo \
+	pamir-keyinput-raw.dtbo \
+	pamir-keyinput.dtbo
 
 targets += dtbs dtbs_install
 targets += $(dtbo-y)

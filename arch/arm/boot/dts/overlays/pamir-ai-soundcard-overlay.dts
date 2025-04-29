@@ -1,0 +1,52 @@
+// Definitions for Google voiceHAT v1 soundcard overlay
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&i2s_clk_producer>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+
+	fragment@1 {
+		target-path = "/";
+		__overlay__ {
+
+			pamir-ai-soundcard {
+				#sound-dai-cells = <0>;
+				compatible = "pamir-ai,dummy_soundcard";
+				status = "okay";
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <&sound>;
+		__overlay__ {
+			compatible = "pamir-ai,soundcard";
+			i2s-controller = <&i2s_clk_producer>;
+			status = "okay";
+		};
+	};
+
+	fragment@3 {
+        	target = <&i2c_arm>;
+
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			pamir_ai_sound: pamir-ai-i2c-sound@18 {
+				reg = <0x18>;
+				compatible = "pamir-ai,i2c-sound";
+				status = "okay";
+			};
+		};
+	};
+};
