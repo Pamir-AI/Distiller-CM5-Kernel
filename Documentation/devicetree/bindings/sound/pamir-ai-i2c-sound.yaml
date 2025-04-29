@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/pamir-ai-i2c-sound.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Pamir AI I2C Sound Device Tree Bindings
+
+maintainers:
+  - Utsav Balar <utsavbalar1231@gmail.com>
+
+description: |
+  This binding describes the Pamir AI I2C sound driver which interfaces with
+  the TLV320AIC3204 audio codec via I2C. The driver provides volume control,
+  input gain adjustment, and direct register access functionality.
+
+properties:
+  compatible:
+    const: pamir-ai,i2c-sound
+
+  reg:
+    maxItems: 1
+    description: I2C device address (typically 0x18)
+
+  status:
+    enum:
+      - okay
+      - disabled
+
+required:
+  - compatible
+  - reg
+  - status
+
+additionalProperties: false
+
+examples:
+  - |
+    &i2c_arm {
+      status = "okay";
+      
+      pamir_ai_sound: pamir-ai-i2c-sound@18 {
+        reg = <0x18>;
+        compatible = "pamir-ai,i2c-sound";
+        status = "okay";
+      };
+    }; 
