@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: GPL-2.0
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/display/gdepaper.h>
+
+/ {
+    	compatible = "brcm,bcm2712";
+
+	fragment@0 {
+        	target = <&gpio>;
+        	__overlay__ {
+            		epaper_pins: epaper_pins {
+                		brcm,pins = <7 13 9>; // DC, Reset, Busy
+                		brcm,function = <1 1 0>; // out, out, in
+                		brcm,pull = <0 0 2>; // No pull for DC/Reset (outputs), pull-up for Busy (input)
+            		};
+        	};
+    	};
+
+	fragment@1 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@2 {
+        	target = <&spi0>;
+        	__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+            		status = "okay";
+
+            		epd@0 {
+                		compatible = "pamir,gdey037t03";
+                		reg = <0>; // cs0
+				spi-speed-hz = <30000000>;
+                		spi-max-frequency = <40000000>;
+                		dc-gpios = <&gpio 7 GPIO_ACTIVE_HIGH>; // active low
+                		reset-gpios = <&gpio 13 GPIO_ACTIVE_HIGH>; // active high
+                		busy-gpios = <&gpio 9 GPIO_ACTIVE_HIGH>; // active low
+                		colors = <GDEPAPER_COL_BW>;
+				width-mm = <82>; // Physical width in mm
+				height-mm = <47>; // Physical height in mm
+				width-px = <240>; // Width in pixels
+				height-px = <416>; // Height in pixels
+                		pinctrl-names = "default";
+                		pinctrl-0 = <&epaper_pins>;
+            		};
+        	};
+    	}; 
+};
