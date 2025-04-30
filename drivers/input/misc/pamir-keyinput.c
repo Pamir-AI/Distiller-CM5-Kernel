@@ -166,7 +166,7 @@ static void process_button_state(struct pamir_key_input_data *priv,
 					       priv->config.debounce_ms))) {
 			bool pressed = (state & SHUT_DOWN_MASK) != 0;
 
-			input_report_key(input_dev, KEY_POWER, pressed);
+			// input_report_key(input_dev, KEY_POWER, pressed);
 			priv->last_btn_jiffies[3] = now;
 			debounced_change = true;
 
@@ -362,7 +362,7 @@ static int key_input_probe(struct serdev_device *serdev)
 	__set_bit(KEY_UP, input_dev->keybit);
 	__set_bit(KEY_DOWN, input_dev->keybit);
 	__set_bit(KEY_ENTER, input_dev->keybit);
-	__set_bit(KEY_POWER, input_dev->keybit);
+	// __set_bit(KEY_POWER, input_dev->keybit);
 
 	dev_info(&serdev->dev, "Registering input device\n");
 	ret = input_register_device(input_dev);
