@@ -1,0 +1,387 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2155
+
+set -euo pipefail
+
+# ===========================================
+# Pamir AI Kernel GitHub Release Script
+# ===========================================
+
+# Default configuration values
+readonly DEFAULT_REPO="Pamir-AI/Distiller-CM5-Kernel"
+readonly DEFAULT_TAG_PREFIX="v"
+readonly DEFAULT_RELEASE_TITLE_FORMAT="Pamir AI Kernel %s"
+readonly DEFAULT_PRERELEASE=false
+readonly DEFAULT_DRAFT=false
+readonly DEFAULT_DATE_FORMAT="%Y%m%d"
+
+# Initialize variables with defaults
+REPO="${DEFAULT_REPO}"
+TAG_PREFIX="${DEFAULT_TAG_PREFIX}"
+RELEASE_TITLE_FORMAT="${DEFAULT_RELEASE_TITLE_FORMAT}"
+PRERELEASE="${DEFAULT_PRERELEASE}"
+DRAFT="${DEFAULT_DRAFT}"
+VERBOSE=false
+TARBALL_PATH=""
+INCLUDE_INSTALLER=true
+CUSTOM_TAG=""
+CHANGELOG_FILE=""
+CHANGELOG_TEXT=""
+HELP=false
+
+# ANSI color codes
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[0;33m'
+readonly BLUE='\033[0;34m'
+readonly BOLD='\033[1m'
+readonly NC='\033[0m' # No Color
+
+show_help() {
+    cat <<-EOF
+		${BLUE}${BOLD}Pamir AI Kernel GitHub Release Script${NC}
+		Usage: $(basename "$0") [options]
+
+		Options:
+		  -r, --repo REPO         GitHub repository (default: ${DEFAULT_REPO})
+		  -t, --tag-prefix PREFIX Prefix for release tag (default: ${DEFAULT_TAG_PREFIX})
+		  --title-format FORMAT   Format for release title (default: "${DEFAULT_RELEASE_TITLE_FORMAT}")
+		  -f, --file PATH         Specific tarball file to release (default: auto-detect latest)
+		  --tag TAG               Custom tag name (default: auto-generated from version and date)
+		  --changelog FILE        Path to a changelog file to include in the release notes
+		  --changelog-text TEXT   Inline changelog text to include in the release notes
+		  --no-installer          Don't include the install.sh script in the release
+		  --prerelease            Mark release as prerelease
+		  --draft                 Create as draft release
+		  -v, --verbose           Enable verbose output
+		  -h, --help              Show this help message
+
+		Examples:
+		  $(basename "$0")                                # Release latest tarball
+		  $(basename "$0") -f path/to/tarball.tar.gz      # Release specific tarball
+		  $(basename "$0") --changelog CHANGELOG.md       # Include changelog from file
+		  $(basename "$0") --changelog-text "Bug fixes"   # Include inline changelog
+		  $(basename "$0") --prerelease                   # Create a prerelease
+
+		Requirements:
+		  - GitHub CLI (gh) must be installed and authenticated
+		  - You must have write access to the specified repository
+	EOF
+}
+
+log() {
+    local level=$1
+    local message=$2
+    local color=$NC
+
+    case $level in
+    info) color=$GREEN ;;
+    warn) color=$YELLOW ;;
+    error) color=$RED ;;
+    section) color=$BLUE$BOLD ;;
+    esac
+
+    printf "${color}[%s] %s${NC}\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${message}" >&2
+}
+
+check_gh_cli() {
+    log section "Checking for GitHub CLI"
+    
+    if ! command -v gh &>/dev/null; then
+        log error "GitHub CLI (gh) is not installed"
+        log error "Install it from: https://cli.github.com/"
+        exit 1
+    fi
+    
+    # Test authentication status
+    if ! gh auth status &>/dev/null; then
+        log error "GitHub CLI is not authenticated"
+        log error "Please run 'gh auth login' first"
+        exit 1
+    fi
+    
+    log info "GitHub CLI is available and authenticated"
+}
+
+check_files() {
+    log section "Checking required files"
+    
+    # Check if kernel installer script exists
+    if [[ "$INCLUDE_INSTALLER" == true && ! -f "scripts/kernel-install" ]]; then
+        log error "Kernel installer script not found at scripts/kernel-install"
+        log error "Make sure you're running this script from the repository root"
+        exit 1
+    fi
+    
+    # Check if changelog file exists (if specified)
+    if [[ -n "${CHANGELOG_FILE}" && ! -f "${CHANGELOG_FILE}" ]]; then
+        log error "Specified changelog file does not exist: ${CHANGELOG_FILE}"
+        exit 1
+    fi
+    
+    log info "All required files found"
+}
+
+find_latest_tarball() {
+    log section "Finding latest kernel tarball"
+    
+    if [[ -n "${TARBALL_PATH}" ]]; then
+        if [[ ! -f "${TARBALL_PATH}" ]]; then
+            log error "Specified tarball does not exist: ${TARBALL_PATH}"
+            exit 1
+        fi
+        
+        log info "Using specified tarball: ${TARBALL_PATH}"
+        return 0
+    fi
+    
+    # Find most recent tarball with the pamir-ai-kernel prefix
+    local latest_tarball=$(find . -maxdepth 1 -name "pamir-ai-kernel-*.tar.gz" -type f -printf "%T@ %p\n" | sort -nr | head -n1 | cut -d' ' -f2-)
+    
+    if [[ -z "${latest_tarball}" ]]; then
+        log error "No kernel tarballs found"
+        log error "Build a kernel first with ./scripts/kernel-build"
+        exit 1
+    fi
+    
+    TARBALL_PATH="${latest_tarball}"
+    log info "Found latest tarball: ${TARBALL_PATH}"
+}
+
+extract_version() {
+    log section "Extracting version information"
+    
+    local tarball_name=$(basename "${TARBALL_PATH}")
+    
+    # Extract version from tarball name (pattern: pamir-ai-kernel-VERSION.tar.gz)
+    local version=""
+    if [[ "${tarball_name}" =~ pamir-ai-kernel-(.*)\.tar\.gz ]]; then
+        version="${BASH_REMATCH[1]}"
+    else
+        log error "Could not extract version from tarball name: ${tarball_name}"
+        exit 1
+    fi
+    
+    log info "Extracted version: ${version}"
+    
+    # Check kernel-version-info if available
+    if [[ -f "out/boot/kernel-version-info" ]]; then
+        log info "Additional version information:"
+        cat "out/boot/kernel-version-info" | while read -r line; do
+            log info "  ${line}"
+        done
+    fi
+    
+    # Create tag and release title
+    local tag=""
+    if [[ -n "${CUSTOM_TAG}" ]]; then
+        tag="${CUSTOM_TAG}"
+    else
+        # Include date in tag in YYYYMMDD format to match kernel-build
+        local date_suffix=$(date +"${DEFAULT_DATE_FORMAT}")
+        tag="${TAG_PREFIX}${date_suffix}-${version}"
+    fi
+    
+    local release_title=$(printf "${RELEASE_TITLE_FORMAT}" "${version}")
+    
+    echo "${version}|${tag}|${release_title}"
+}
+
+create_release_notes() {
+    local version=$1
+    local notes=""
+    
+    # Include kernel version info if available
+    if [[ -f "out/boot/kernel-version-info" ]]; then
+        notes+="## Kernel Information\n\n\`\`\`\n"
+        notes+="$(cat "out/boot/kernel-version-info")"
+        notes+="\n\`\`\`\n\n"
+    fi
+    
+    # Add changelog section if provided
+    if [[ -n "${CHANGELOG_FILE}" || -n "${CHANGELOG_TEXT}" ]]; then
+        notes+="## Changelog\n\n"
+        
+        if [[ -n "${CHANGELOG_FILE}" ]]; then
+            notes+="$(cat "${CHANGELOG_FILE}")\n\n"
+        elif [[ -n "${CHANGELOG_TEXT}" ]]; then
+            notes+="${CHANGELOG_TEXT}\n\n"
+        fi
+    fi
+    
+    # Add standard installation instructions
+    notes+="## Installation\n\n"
+    notes+="### Option 1: Using the install script\n\n"
+    notes+="1. Download both the tarball and kernel-install script\n"
+    notes+="2. Run the installer with root privileges:\n"
+    notes+="\`\`\`\n"
+    notes+="sudo ./kernel-install pamir-ai-kernel-${version}.tar.gz\n"
+    notes+="\`\`\`\n\n"
+    
+    notes+="### Option 2: Manual installation\n\n"
+    notes+="1. Download the tarball\n"
+    notes+="2. Extract: \`tar -xzvf pamir-ai-kernel-${version}.tar.gz\`\n"
+    notes+="3. Copy files to your Raspberry Pi:\n"
+    notes+="\`\`\`\n"
+    notes+="# Copy kernel and device tree files\n"
+    notes+="sudo cp -r out/boot/kernel*.img /boot/firmware/\n"
+    notes+="sudo cp -r out/boot/*.dtb /boot/firmware/\n"
+    notes+="sudo cp -r out/boot/overlays/*.dtbo /boot/firmware/overlays/\n\n"
+    notes+="# Copy kernel modules\n"
+    notes+="sudo cp -r out/lib/modules/* /lib/modules/\n"
+    notes+="\`\`\`\n\n"
+    notes+="4. Reboot: \`sudo reboot\`\n\n"
+    
+    # Add build script info
+    notes+="## Build Information\n\n"
+    notes+="Built using the Pamir AI kernel build script.\n"
+    notes+="Build date: $(date '+%Y-%m-%d %H:%M:%S')\n"
+    
+    echo "${notes}"
+}
+
+create_gh_release() {
+    log section "Creating GitHub release"
+    
+    local version_info=$(extract_version)
+    local version=$(echo "${version_info}" | cut -d'|' -f1)
+    local tag=$(echo "${version_info}" | cut -d'|' -f2)
+    local title=$(echo "${version_info}" | cut -d'|' -f3)
+    
+    log info "Release tag: ${tag}"
+    log info "Release title: ${title}"
+    
+    # Create release notes
+    local release_notes=$(create_release_notes "${version}")
+    local release_notes_file=$(mktemp)
+    echo -e "${release_notes}" > "${release_notes_file}"
+    
+    # Build release command
+    local cmd="gh release create \"${tag}\""
+    cmd+=" --repo \"${REPO}\""
+    cmd+=" --title \"${title}\""
+    cmd+=" --notes-file \"${release_notes_file}\""
+    
+    if [[ "${PRERELEASE}" == true ]]; then
+        cmd+=" --prerelease"
+    fi
+    
+    if [[ "${DRAFT}" == true ]]; then
+        cmd+=" --draft"
+    fi
+    
+    cmd+=" \"${TARBALL_PATH}#Kernel Tarball\""
+    
+    # Add installer script if requested
+    if [[ "${INCLUDE_INSTALLER}" == true ]]; then
+        # Copy the installer script to the current directory for the release
+        cp "scripts/kernel-install" "kernel-install"
+        chmod +x "kernel-install"
+        cmd+=" \"kernel-install#Kernel Installer Script\""
+    fi
+    
+    # Execute command
+    log info "Creating GitHub release..."
+    
+    if [[ "${VERBOSE}" == true ]]; then
+        log info "Executing: ${cmd}"
+        eval "${cmd}"
+    else
+        eval "${cmd}" >/dev/null 2>&1
+    fi
+    
+    # Cleanup
+    rm -f "${release_notes_file}"
+    if [[ "${INCLUDE_INSTALLER}" == true ]]; then
+        rm -f "kernel-install"
+    fi
+    
+    log info "Successfully created release ${tag} on GitHub"
+    log info "Release URL: https://github.com/${REPO}/releases/tag/${tag}"
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+    -r | --repo)
+        REPO="$2"
+        shift 2
+        ;;
+    -t | --tag-prefix)
+        TAG_PREFIX="$2"
+        shift 2
+        ;;
+    --title-format)
+        RELEASE_TITLE_FORMAT="$2"
+        shift 2
+        ;;
+    -f | --file)
+        TARBALL_PATH="$2"
+        shift 2
+        ;;
+    --tag)
+        CUSTOM_TAG="$2"
+        shift 2
+        ;;
+    --changelog)
+        CHANGELOG_FILE="$2"
+        shift 2
+        ;;
+    --changelog-text)
+        CHANGELOG_TEXT="$2"
+        shift 2
+        ;;
+    --no-installer)
+        INCLUDE_INSTALLER=false
+        shift
+        ;;
+    --prerelease)
+        PRERELEASE=true
+        shift
+        ;;
+    --draft)
+        DRAFT=true
+        shift
+        ;;
+    -v | --verbose)
+        VERBOSE=true
+        shift
+        ;;
+    -h | --help)
+        HELP=true
+        shift
+        ;;
+    *)
+        log error "Unknown option: $1"
+        show_help
+        exit 1
+        ;;
+    esac
+done
+
+if [[ "${HELP}" == true ]]; then
+    show_help
+    exit 0
+fi
+
+log section "Starting GitHub release process"
+log info "Repository:      ${REPO}"
+log info "Tag prefix:      ${TAG_PREFIX}"
+log info "Title format:    ${RELEASE_TITLE_FORMAT}"
+log info "Include installer: ${INCLUDE_INSTALLER}"
+if [[ -n "${CHANGELOG_FILE}" ]]; then
+    log info "Changelog file:  ${CHANGELOG_FILE}"
+elif [[ -n "${CHANGELOG_TEXT}" ]]; then
+    log info "Changelog:       Provided as text"
+fi
+log info "Prerelease:      ${PRERELEASE}"
+log info "Draft:           ${DRAFT}"
+log info "Verbose:         ${VERBOSE}"
+
+check_gh_cli
+check_files
+find_latest_tarball
+create_gh_release
+
+log section "GitHub release process completed successfully!"
+exit 0 

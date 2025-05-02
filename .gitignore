@@ -178,3 +178,6 @@ sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
+
+# Ignore CHANGELOG.md for scripts/relase-to-github
+CHANGELOG.md
