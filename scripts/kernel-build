@@ -1,0 +1,687 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2155
+
+set -euo pipefail
+
+# ===========================================
+# Pamir AI Kernel Build Script with LLVM/LTO/PGO
+# ===========================================
+
+# Default configuration values
+readonly DEFAULT_KERNEL="kernel_2712"
+readonly DEFAULT_ARCH="arm64"
+readonly DEFAULT_CROSS_COMPILE="aarch64-linux-gnu-"
+readonly DEFAULT_CONFIG="bcm2712_defconfig"
+readonly DEFAULT_LOCALVERSION="-pamir-ai"
+readonly DEFAULT_OUTPUT_DIR="out"
+readonly DEFAULT_THREADS=$(nproc --all)
+
+# Build modes
+readonly MODE_DEFAULT="default" # GCC build
+readonly MODE_LLVM="llvm"       # LLVM build without LTO
+readonly MODE_LTO="lto"         # LLVM build with LTO
+readonly MODE_PGO_GEN="pgo-gen" # LLVM build generating profile data
+readonly MODE_PGO_USE="pgo-use" # LLVM build using profile data
+
+# Version and build information
+readonly BUILD_DATE=$(date +%Y%m%d)
+readonly GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+readonly GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+readonly BUILD_VERSION="${BUILD_DATE}-${GIT_BRANCH}-${GIT_COMMIT}"
+
+# Initialize variables with defaults
+KERNEL="${DEFAULT_KERNEL}"
+ARCH="${DEFAULT_ARCH}"
+CROSS_COMPILE="${DEFAULT_CROSS_COMPILE}"
+CONFIG="${DEFAULT_CONFIG}"
+LOCALVERSION="${DEFAULT_LOCALVERSION}"
+OUTPUT_DIR="${DEFAULT_OUTPUT_DIR}"
+THREADS="${DEFAULT_THREADS}"
+BUILD_MODE="${MODE_DEFAULT}"
+PGO_DIR="$(pwd)/pgo-data"
+VERSION_SUFFIX=""
+CLEAN=false
+MRPROPER=false
+CCACHE=true
+MENUCONFIG=false
+VERBOSE=false
+TARBALL=true
+SKIP_BUILD=false
+HELP=false
+
+# ANSI color codes
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[0;33m'
+readonly BLUE='\033[0;34m'
+readonly BOLD='\033[1m'
+readonly NC='\033[0m' # No Color
+
+show_help() {
+	cat <<-EOF
+		${BLUE}${BOLD}Pamir AI Kernel Build Script${NC}
+		Usage: $(basename "$0") [options]
+
+		Options:
+		  -k, --kernel NAME       Set kernel name (default: ${DEFAULT_KERNEL})
+		  -a, --arch ARCH         Set architecture (default: ${DEFAULT_ARCH})
+		  -c, --cross TOOLCHAIN   Set cross compiler prefix (default: ${DEFAULT_CROSS_COMPILE})
+		  -d, --defconfig CONFIG  Set kernel defconfig (default: ${DEFAULT_CONFIG})
+		  -l, --localversion VER  Set kernel localversion (default: ${DEFAULT_LOCALVERSION})
+		  -o, --output DIR        Set output directory (default: ${DEFAULT_OUTPUT_DIR})
+		  -j, --jobs THREADS      Set number of build threads (default: $(nproc))
+		  -m, --menuconfig        Run menuconfig before building
+		  --mode MODE             Build mode: default, llvm, lto, pgo-gen, pgo-use
+		  --pgo-dir DIR           Directory for PGO data (default: ./pgo-data)
+		  --version-suffix TEXT   Append custom text to version 
+
+		Build Options:
+		  -C, --clean             Run make clean before building
+		  -M, --mrproper          Run make mrproper before building
+		  --no-ccache             Disable ccache
+		  --no-tarball            Don't create tarball
+		  --skip-build            Skip the build process (for testing)
+		  -v, --verbose           Enable verbose output
+		  -h, --help              Show this help message
+
+		Example:
+		  $(basename "$0") --mode lto --clean --menuconfig -j8
+		  $(basename "$0") --mode pgo-gen -C -v
+		  $(basename "$0") --mode pgo-use --pgo-dir /path/to/pgo-data -v
+
+		Current Build Version: ${BUILD_VERSION}
+	EOF
+}
+
+log() {
+	local level=$1
+	local message=$2
+	local color=$NC
+
+	case $level in
+	info) color=$GREEN ;;
+	warn) color=$YELLOW ;;
+	error) color=$RED ;;
+	section) color=$BLUE$BOLD ;;
+	esac
+
+	printf "${color}[%s] %s${NC}\n" "$(date '+%Y-%m-%d %H:%M:%S')" "${message}" >&2
+}
+
+run_cmd() {
+	local cmd=$1
+	local error_msg=$2
+
+	if [[ "$VERBOSE" == true ]]; then
+		log info "Executing: $cmd"
+		eval "$cmd" || {
+			log error "$error_msg"
+			return 1
+		}
+	else
+		log info "Executing: $cmd"
+		eval "$cmd" >/dev/null 2>&1 || {
+			log error "$error_msg"
+			return 1
+		}
+	fi
+}
+
+check_dependencies() {
+	log section "Checking dependencies"
+
+	local missing_deps=()
+	local deps=("make" "grep" "find" "tar" "git")
+
+	# Add mode-specific dependencies
+	case "$BUILD_MODE" in
+	"$MODE_DEFAULT")
+		deps+=("${CROSS_COMPILE}gcc")
+		;;
+	"$MODE_LLVM" | "$MODE_LTO" | "$MODE_PGO_GEN" | "$MODE_PGO_USE")
+		deps+=("clang" "lld" "llvm-profdata")
+		;;
+	esac
+
+	if [[ "$CCACHE" == true ]]; then
+		deps+=("ccache")
+	fi
+
+	for dep in "${deps[@]}"; do
+		if ! command -v "$dep" >/dev/null 2>&1; then
+			missing_deps+=("$dep")
+		fi
+	done
+
+	if ((${#missing_deps[@]} > 0)); then
+		log error "Missing dependencies: ${missing_deps[*]}"
+		log error "Please install them and try again."
+		exit 1
+	fi
+
+	log info "All dependencies are satisfied."
+}
+
+setup_compiler_flags() {
+	# Reset compiler flags
+	unset CC LD AR NM STRIP OBJCOPY OBJDUMP READELF HOSTCC HOSTCXX HOSTAR CFLAGS LDFLAGS
+
+	# Set up compiler flags based on build mode
+	case "$BUILD_MODE" in
+	"$MODE_DEFAULT")
+		# Using default GCC
+		export CROSS_COMPILE="$CROSS_COMPILE"
+		log info "Using GCC toolchain: ${CROSS_COMPILE}gcc"
+		;;
+
+	"$MODE_LLVM")
+		# Using LLVM without LTO
+		export LLVM=1
+		export LLVM_IAS=1
+		export CROSS_COMPILE="$CROSS_COMPILE"
+		export CC="clang"
+		export LD="ld.lld"
+		export AR="llvm-ar"
+		export NM="llvm-nm"
+		export STRIP="llvm-strip"
+		export OBJCOPY="llvm-objcopy"
+		export OBJDUMP="llvm-objdump"
+		export READELF="llvm-readelf"
+		export HOSTCC="clang"
+		export HOSTCXX="clang++"
+		export HOSTAR="llvm-ar"
+		log info "Using LLVM toolchain: clang, lld, llvm-ar"
+		;;
+
+	"$MODE_LTO")
+		# Using LLVM with LTO
+		export LLVM=1
+		export LLVM_IAS=1
+		export CROSS_COMPILE="$CROSS_COMPILE"
+		export CC="clang"
+		export LD="ld.lld"
+		export AR="llvm-ar"
+		export NM="llvm-nm"
+		export STRIP="llvm-strip"
+		export OBJCOPY="llvm-objcopy"
+		export OBJDUMP="llvm-objdump"
+		export READELF="llvm-readelf"
+		export HOSTCC="clang"
+		export HOSTCXX="clang++"
+		export HOSTAR="llvm-ar"
+		export CFLAGS="-flto=thin"
+		export LDFLAGS="-flto=thin"
+		log info "Using LLVM toolchain with LTO: clang, lld, llvm-ar"
+		;;
+
+	"$MODE_PGO_GEN")
+		# LLVM with profile generation
+		export LLVM=1
+		export LLVM_IAS=1
+		export CROSS_COMPILE="$CROSS_COMPILE"
+		export CC="clang"
+		export LD="ld.lld"
+		export AR="llvm-ar"
+		export NM="llvm-nm"
+		export STRIP="llvm-strip"
+		export OBJCOPY="llvm-objcopy"
+		export OBJDUMP="llvm-objdump"
+		export READELF="llvm-readelf"
+		export HOSTCC="clang"
+		export HOSTCXX="clang++"
+		export HOSTAR="llvm-ar"
+		export CFLAGS="-fprofile-generate=$PGO_DIR"
+		export LDFLAGS="-fprofile-generate=$PGO_DIR"
+		log info "Using LLVM toolchain with PGO generation: profile data will be saved to $PGO_DIR"
+		mkdir -p "$PGO_DIR"
+		;;
+
+	"$MODE_PGO_USE")
+		# LLVM with profile use
+		if [[ ! -d "$PGO_DIR" ]]; then
+			log error "PGO directory $PGO_DIR does not exist. Run with --mode pgo-gen first."
+			exit 1
+		fi
+
+		# Create merged profile data
+		if [[ -d "$PGO_DIR" ]] && ls "$PGO_DIR"/*.profraw >/dev/null 2>&1; then
+			log info "Merging profile data from $PGO_DIR"
+			mkdir -p "$PGO_DIR/merged"
+			llvm-profdata merge -output="$PGO_DIR/merged/default.profdata" "$PGO_DIR"/*.profraw
+		else
+			log error "No profile data found in $PGO_DIR. Run with --mode pgo-gen first."
+			exit 1
+		fi
+
+		export LLVM=1
+		export LLVM_IAS=1
+		export CROSS_COMPILE="$CROSS_COMPILE"
+		export CC="clang"
+		export LD="ld.lld"
+		export AR="llvm-ar"
+		export NM="llvm-nm"
+		export STRIP="llvm-strip"
+		export OBJCOPY="llvm-objcopy"
+		export OBJDUMP="llvm-objdump"
+		export READELF="llvm-readelf"
+		export HOSTCC="clang"
+		export HOSTCXX="clang++"
+		export HOSTAR="llvm-ar"
+		export CFLAGS="-flto=thin -fprofile-use=$PGO_DIR/merged/default.profdata"
+		export LDFLAGS="-flto=thin -fprofile-use=$PGO_DIR/merged/default.profdata"
+		log info "Using LLVM toolchain with PGO use: using profile data from $PGO_DIR/merged/default.profdata"
+		;;
+	esac
+
+	# Add ccache if enabled
+	if [[ "$CCACHE" == true ]] && command -v ccache >/dev/null 2>&1; then
+		if [[ -n "${CC:-}" ]]; then
+			export CC="ccache $CC"
+			export HOSTCC="ccache $HOSTCC"
+			export HOSTCXX="ccache $HOSTCXX"
+		fi
+		if [[ "$BUILD_MODE" == "$MODE_DEFAULT" ]]; then
+			export CROSS_COMPILE="ccache $CROSS_COMPILE"
+		fi
+		log info "Using ccache for faster compilation"
+	fi
+}
+
+get_full_kernel_version() {
+	# Get kernel base version
+	local base_ver=""
+	if [[ -f "include/config/kernel.release" ]]; then
+		base_ver=$(cat "include/config/kernel.release" 2>/dev/null || echo "")
+	fi
+
+	# If we couldn't get the base version, use a fallback
+	if [[ -z "$base_ver" ]]; then
+		base_ver="${KERNEL}"
+	fi
+
+	# Clean up the base version to remove any previous build artifacts
+	# This is critical to prevent accumulation when running the script multiple times
+	base_ver=$(echo "$base_ver" | sed -E 's/(-v8-16k|-g-[0-9]+-|-g-[0-9]+.*|-v-[0-9]+.*|-l-[0-9]+.*|-pg-[0-9]+.*|-p-[0-9]+.*|-.{6,7}-.{4,7}$).*//g')
+
+	# Get just the base kernel version without any suffixes
+	local kernel_version=""
+	if [[ "$base_ver" =~ ^([0-9]+\.[0-9]+\.[0-9]+).*$ ]]; then
+		kernel_version="${BASH_REMATCH[1]}"
+	else
+		kernel_version="$base_ver"
+	fi
+
+	# Build the version suffix starting with arch/platform info for ARM64
+	local version_suffix=""
+	if [[ "$ARCH" == "arm64" && "$base_ver" != *"v8-16k"* ]]; then
+		# Only add v8-16k if it's not already present in the base version
+		version_suffix="-v8-16k"
+	fi
+
+	# Add the localversion if it's not already in the base version
+	if [[ "$base_ver" != *"pamir-ai"* && -n "$LOCALVERSION" ]]; then
+		version_suffix="${version_suffix}${LOCALVERSION}"
+	fi
+
+	# Add build mode to the version string (abbreviated)
+	case "$BUILD_MODE" in
+	"$MODE_DEFAULT") version_suffix="${version_suffix}-g" ;;  # gcc
+	"$MODE_LLVM") version_suffix="${version_suffix}-v" ;;     # llvm
+	"$MODE_LTO") version_suffix="${version_suffix}-l" ;;      # lto
+	"$MODE_PGO_GEN") version_suffix="${version_suffix}-pg" ;; # pgo-gen
+	"$MODE_PGO_USE") version_suffix="${version_suffix}-p" ;;  # pgo
+	esac
+
+	# Add abbreviated version suffix if specified
+	if [[ -n "$VERSION_SUFFIX" ]]; then
+		# Take only first 8 chars of suffix to keep it short
+		local short_suffix="${VERSION_SUFFIX:0:8}"
+		version_suffix="${version_suffix}-${short_suffix}"
+	fi
+
+	# Add date in compact format (MMDD) and short git hash
+	local git_short="${GIT_COMMIT:0:7}"
+	local short_date=$(date +%m%d)
+	version_suffix="${version_suffix}-${short_date}-${git_short}"
+
+	# Check if the combined version string exceeds the 64-char limit
+	local total_length=${#kernel_version}
+	total_length=$((total_length + ${#version_suffix}))
+
+	if ((total_length > 63)); then # 63 to give some margin
+		log warn "Version string exceeds 64 characters, truncating..."
+		# Calculate how many characters to keep from our custom version
+		local keep_chars=$((63 - ${#kernel_version}))
+		if ((keep_chars < 10)); then
+			# If very limited space, just use date and hash
+			version_suffix="-${short_date}${git_short:0:5}"
+		else
+			# Truncate our version string to fit
+			version_suffix="${version_suffix:0:$keep_chars}"
+		fi
+	fi
+
+	# For actual full version name (filename, tarball, etc.)
+	local visible_full_version="${kernel_version}${version_suffix}"
+
+	# For LOCALVERSION passed to kernel build (don't include base_ver which is already there)
+	if [[ -n "${1:-}" && "$1" == "localversion" ]]; then
+		echo "$version_suffix"
+	else
+		echo "$visible_full_version"
+	fi
+}
+
+prepare_env() {
+	log section "Preparing build environment"
+
+	# Set up environment variables
+	export ARCH="$ARCH"
+	export CONFIG_LOCALVERSION="$LOCALVERSION"
+	setup_compiler_flags
+
+	# Generate full version info
+	local full_version
+	full_version=$(get_full_kernel_version)
+	log info "Building kernel version: $full_version"
+
+	# Create/clean output directory
+	log info "Removing existing output directory: $OUTPUT_DIR"
+	rm -rf "$OUTPUT_DIR"
+	mkdir -p "$OUTPUT_DIR"
+
+	# Clean previous build if requested
+	if [[ "$MRPROPER" == true ]]; then
+		log info "Running mrproper to clean previous build artifacts"
+		run_cmd "make ARCH=\"$ARCH\" -j\"$THREADS\" mrproper" \
+			"Failed to run make mrproper"
+	elif [[ "$CLEAN" == true ]]; then
+		log info "Running clean to clean previous build artifacts"
+		run_cmd "make ARCH=\"$ARCH\" -j\"$THREADS\" clean" \
+			"Failed to run make clean"
+	fi
+}
+
+configure_kernel() {
+	log section "Configuring kernel"
+
+	# Store the current kernel build version in a file
+	local full_version
+	full_version=$(get_full_kernel_version)
+	echo "$full_version" >".kernel-version"
+
+	# Apply defconfig
+	log info "Applying defconfig: $CONFIG"
+
+	local config_cmd="make ARCH=\"$ARCH\" $CONFIG"
+	run_cmd "$config_cmd" "Failed to apply defconfig"
+
+	# Enable LTO and PGO in config if applicable
+	if [[ "$BUILD_MODE" == "$MODE_LTO" || "$BUILD_MODE" == "$MODE_PGO_USE" ]]; then
+		log info "Enabling LTO in kernel config"
+		run_cmd "scripts/config --file .config --enable CONFIG_LTO_CLANG_FULL" \
+			"Failed to enable CONFIG_LTO_CLANG_FULL"
+	fi
+
+	# Run menuconfig if requested
+	if [[ "$MENUCONFIG" == true ]]; then
+		log info "Running menuconfig"
+		make ARCH="$ARCH" menuconfig
+	fi
+}
+
+build_kernel() {
+	log section "Building kernel"
+
+	if [[ "$SKIP_BUILD" == true ]]; then
+		log warn "Skipping build process as requested"
+		return 0
+	fi
+
+	local start_time
+	start_time=$(date +%s)
+
+	# Build kernel image, modules, and device tree
+	log info "Building kernel image, modules, and device tree"
+
+	# Get localversion to pass to build (not the full version)
+	local localversion
+	localversion=$(get_full_kernel_version localversion)
+	log info "Building with localversion: $localversion"
+
+	# Configure additional make flags
+	local make_flags=()
+	make_flags+=("ARCH=$ARCH")
+	make_flags+=("LOCALVERSION=$localversion")
+
+	# Convert the make_flags array to a string
+	local make_flags_str="${make_flags[*]}"
+
+	local make_cmd="make $make_flags_str -j\"$THREADS\""
+
+	if [[ "$VERBOSE" == true ]]; then
+		eval "$make_cmd Image modules dtbs" || {
+			log error "Failed to build kernel"
+			return 1
+		}
+	else
+		eval "$make_cmd Image modules dtbs" >/dev/null 2>&1 || {
+			log error "Failed to build kernel"
+			return 1
+		}
+	fi
+
+	local end_time
+	end_time=$(date +%s)
+	local build_time=$((end_time - start_time))
+	log info "Kernel build completed in $build_time seconds"
+}
+
+install_modules() {
+	log section "Installing modules"
+
+	log info "Installing modules to $OUTPUT_DIR"
+	run_cmd "make ARCH=\"$ARCH\" -j\"$THREADS\" INSTALL_MOD_PATH=\"$OUTPUT_DIR\" modules_install" \
+		"Failed to install modules"
+}
+
+package_output() {
+	log section "Packaging build output"
+
+	# Get versions for output
+	local full_version
+	full_version=$(get_full_kernel_version)
+	local localversion
+	localversion=$(get_full_kernel_version localversion)
+
+	log info "Creating directories in $OUTPUT_DIR"
+	mkdir -p "$OUTPUT_DIR/boot/overlays"
+
+	log info "Copying kernel image to $OUTPUT_DIR/boot/"
+	cp -a "arch/$ARCH/boot/Image" "$OUTPUT_DIR/boot/kernel-$full_version.img"
+	ln -sf "kernel-$full_version.img" "$OUTPUT_DIR/boot/kernel.img"
+
+	# Store complete version info in a separate file for reference
+	# This can include more details since it's not limited to 64 chars
+	local complete_info="$(
+		cat <<EOF
+Kernel: $KERNEL
+Base Version: $(cat "include/config/kernel.release" 2>/dev/null || echo "$KERNEL")
+Full Version: $full_version
+Build Mode: $BUILD_MODE
+Build Date: $BUILD_DATE
+Git Branch: $GIT_BRANCH
+Git Commit: $GIT_COMMIT
+EOF
+	)"
+	echo "$complete_info" >"$OUTPUT_DIR/boot/kernel-version-info"
+	echo "$full_version" >"$OUTPUT_DIR/boot/kernel-version"
+
+	log info "Copying device tree files to $OUTPUT_DIR/boot/"
+	cp -a "arch/$ARCH/boot/dts/broadcom/"*.dtb "$OUTPUT_DIR/boot/"
+	cp -a "arch/$ARCH/boot/dts/overlays/"*.dtbo "$OUTPUT_DIR/boot/overlays"
+
+	if [[ -f "arch/$ARCH/boot/dts/overlays/README" ]]; then
+		cp -a "arch/$ARCH/boot/dts/overlays/README" "$OUTPUT_DIR/boot/overlays"
+	fi
+
+	if [[ "$TARBALL" == true ]]; then
+		# Extract just the version number with no suffixes and create a clean name
+		local short_version=""
+		if [[ "$full_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+			short_version="${BASH_REMATCH[1]}"
+		else
+			short_version="$full_version"
+		fi
+
+		local tarball_name="pamir-ai-kernel-${short_version}${localversion}.tar.gz"
+
+		log info "Creating tarball: $tarball_name"
+		tar -czf "$tarball_name" "$OUTPUT_DIR"
+
+		log info "Tarball created: $tarball_name"
+	fi
+}
+
+main() {
+	log section "Starting Pamir AI kernel build process"
+	log info "Build mode: $BUILD_MODE"
+	log info "Build version: $(get_full_kernel_version)"
+
+	check_dependencies
+	prepare_env
+	configure_kernel
+	build_kernel
+	install_modules
+	package_output
+
+	log section "Build process completed successfully!"
+	log info "Kernel version: $(get_full_kernel_version)"
+	log info "Output directory: $OUTPUT_DIR"
+
+	if [[ "$TARBALL" == true ]]; then
+		local full_version
+		full_version=$(get_full_kernel_version)
+		local tarball_name="pamir-ai-kernel-$full_version.tar.gz"
+		log info "Tarball: $tarball_name"
+	fi
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	-k | --kernel)
+		KERNEL="$2"
+		shift 2
+		;;
+	-a | --arch)
+		ARCH="$2"
+		shift 2
+		;;
+	-c | --cross)
+		CROSS_COMPILE="$2"
+		shift 2
+		;;
+	-d | --defconfig)
+		CONFIG="$2"
+		shift 2
+		;;
+	-l | --localversion)
+		LOCALVERSION="$2"
+		shift 2
+		;;
+	-o | --output)
+		OUTPUT_DIR="$2"
+		shift 2
+		;;
+	-j | --jobs)
+		THREADS="$2"
+		shift 2
+		;;
+	--mode)
+		case "$2" in
+		"$MODE_DEFAULT" | "$MODE_LLVM" | "$MODE_LTO" | "$MODE_PGO_GEN" | "$MODE_PGO_USE")
+			BUILD_MODE="$2"
+			;;
+		*)
+			log error "Invalid build mode: $2"
+			log error "Valid modes: $MODE_DEFAULT, $MODE_LLVM, $MODE_LTO, $MODE_PGO_GEN, $MODE_PGO_USE"
+			exit 1
+			;;
+		esac
+		shift 2
+		;;
+	--pgo-dir)
+		PGO_DIR="$2"
+		shift 2
+		;;
+	--version-suffix)
+		VERSION_SUFFIX="$2"
+		shift 2
+		;;
+	-C | --clean)
+		CLEAN=true
+		shift
+		;;
+	-M | --mrproper)
+		MRPROPER=true
+		shift
+		;;
+	-m | --menuconfig)
+		MENUCONFIG=true
+		shift
+		;;
+	--no-ccache)
+		CCACHE=false
+		shift
+		;;
+	--no-tarball)
+		TARBALL=false
+		shift
+		;;
+	--skip-build)
+		SKIP_BUILD=true
+		shift
+		;;
+	-v | --verbose)
+		VERBOSE=true
+		shift
+		;;
+	-h | --help)
+		HELP=true
+		shift
+		;;
+	*)
+		log error "Unknown option: $1"
+		show_help
+		exit 1
+		;;
+	esac
+done
+
+if [[ "$HELP" == true ]]; then
+	show_help
+	exit 0
+fi
+
+log section "Build configuration"
+log info "Build mode:     $BUILD_MODE"
+log info "Kernel:         $KERNEL"
+log info "Architecture:   $ARCH"
+log info "Cross Compile:  $CROSS_COMPILE"
+log info "Config:         $CONFIG"
+log info "Local Version:  $LOCALVERSION"
+log info "Output Dir:     $OUTPUT_DIR"
+log info "Threads:        $THREADS"
+log info "PGO Directory:  $PGO_DIR"
+log info "Version:        $(get_full_kernel_version)"
+log info "Clean:          $CLEAN"
+log info "MRProper:       $MRPROPER"
+log info "CCache:         $CCACHE"
+log info "MenuConfig:     $MENUCONFIG"
+log info "Verbose:        $VERBOSE"
+log info "Tarball:        $TARBALL"
+
+main
+
+exit 0
