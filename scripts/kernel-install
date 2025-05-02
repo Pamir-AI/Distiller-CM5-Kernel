@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2155
+
+set -euo pipefail
+
+# ===========================================
+# Pamir AI Kernel Installer
+# Installs custom kernels built with the Pamir AI kernel-build script
+# ===========================================
+
+# Default configuration
+readonly KERNEL_NAME="kernel_2712"
+readonly BOOT_DIR="/boot"
+readonly FIRMWARE_DIR="${BOOT_DIR}/firmware"
+readonly KERNEL_MODULES_DIR="/lib/modules"
+readonly FIRMWARE_OVERLAY_DIR="${FIRMWARE_DIR}/overlays"
+readonly TIMESTAMP=$(date +%Y%m%d%H%M%S)
+readonly TMP_DIR=$(mktemp -d)
+
+# Input variables
+KERNEL_TAR_FILE="${1:-}"
+SKIP_BACKUP="${2:-false}"
+
+# Cleanup temporary directory on exit
+trap 'rm -rf "${TMP_DIR}"' EXIT
+
+show_usage() {
+	cat <<EOF
+Pamir AI Kernel Installer
+
+Usage: ${0##*/} <kernel_tar_file> [skip_backup]
+
+Arguments:
+  kernel_tar_file    Path to the kernel tarball (e.g., pamir-ai-kernel-6.12.25-g-0502-d2b9e0c.tar.gz)
+  skip_backup        Set to 'true' to skip backups (default: false)
+
+Examples:
+  ${0##*/} pamir-ai-kernel-6.12.25-g-0502-d2b9e0c.tar.gz
+  ${0##*/} pamir-ai-kernel-6.12.25-g-0502-d2b9e0c.tar.gz true
+EOF
+}
+
+log() {
+	local level=$1
+	local message=$2
+	local color=""
+	local reset="\033[0m"
+
+	case $level in
+	info) color="\033[0;32m" ;;  # Green
+	warn) color="\033[0;33m" ;;  # Yellow
+	error) color="\033[0;31m" ;; # Red
+	esac
+
+	echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S')] ${message}${reset}" >&2
+}
+
+check_requirements() {
+	log info "Checking installation requirements..."
+
+	# Check for root privileges
+	if [[ ${EUID} -ne 0 ]]; then
+		log error "This script must be run as root"
+		exit 1
+	fi
+
+	# Check for required tar file
+	if [[ -z "${KERNEL_TAR_FILE}" ]]; then
+		log error "No kernel tar file specified"
+		show_usage
+		exit 1
+	fi
+
+	if [[ ! -f "${KERNEL_TAR_FILE}" ]]; then
+		log error "Kernel tarball not found: ${KERNEL_TAR_FILE}"
+		exit 1
+	fi
+
+	# Check for required directories
+	local required_dirs=(
+		"${BOOT_DIR}"
+		"${FIRMWARE_DIR}"
+		"${KERNEL_MODULES_DIR}"
+		"${FIRMWARE_OVERLAY_DIR}"
+	)
+
+	for dir in "${required_dirs[@]}"; do
+		if [[ ! -d "${dir}" ]]; then
+			log error "Required directory not found: ${dir}"
+			exit 1
+		fi
+	done
+
+	log info "All requirements satisfied"
+}
+
+backup_current_kernel() {
+	if [[ "${SKIP_BACKUP}" == "true" ]]; then
+		log info "Skipping backup as requested"
+		return 0
+	fi
+
+	log info "Creating backup of current kernel files (timestamp: ${TIMESTAMP})..."
+
+	# Get current kernel version
+	local kernel_version=$(uname -r)
+
+	# Backup kernel images
+	local kernel_files=(
+		"${FIRMWARE_DIR}/${KERNEL_NAME}.img"
+		"${FIRMWARE_DIR}/kernel8.img"
+	)
+
+	for file in "${kernel_files[@]}"; do
+		if [[ -f "${file}" ]]; then
+			log info "Backing up ${file} to ${file}.bak-${TIMESTAMP}"
+			cp "${file}" "${file}.bak-${TIMESTAMP}" || log warn "Failed to backup ${file}"
+		fi
+	done
+
+	# Backup DTB and overlay files
+	if [[ -d "${FIRMWARE_DIR}" ]]; then
+		find "${FIRMWARE_DIR}" -name "*.dtb" -type f -exec cp {} {}.bak-"${TIMESTAMP}" \; || log warn "Failed to backup DTB files"
+	fi
+
+	if [[ -d "${FIRMWARE_OVERLAY_DIR}" ]]; then
+		find "${FIRMWARE_OVERLAY_DIR}" -name "*.dtbo" -type f -exec cp {} {}.bak-"${TIMESTAMP}" \; || log warn "Failed to backup overlay files"
+	fi
+
+	# Backup kernel modules
+	if [[ -d "${KERNEL_MODULES_DIR}/${kernel_version}" ]]; then
+		log info "Backing up kernel modules from ${KERNEL_MODULES_DIR}/${kernel_version}"
+		cp -a "${KERNEL_MODULES_DIR}/${kernel_version}" "${KERNEL_MODULES_DIR}/${kernel_version}.bak-${TIMESTAMP}" ||
+			log warn "Failed to backup kernel modules"
+	fi
+
+	log info "Backup completed"
+}
+
+extract_kernel_tarball() {
+	log info "Extracting kernel tarball: ${KERNEL_TAR_FILE}"
+
+	tar -xzf "${KERNEL_TAR_FILE}" -C "${TMP_DIR}" || {
+		log error "Failed to extract kernel tarball"
+		exit 1
+	}
+
+	# Check that the extracted contents match expected structure
+	if [[ ! -d "${TMP_DIR}/out" ]]; then
+		log error "Invalid kernel tarball: missing 'out' directory"
+		exit 1
+	fi
+
+	if [[ ! -f "${TMP_DIR}/out/boot/kernel-version" ]]; then
+		log warn "Kernel version information not found in tarball"
+	else
+		local kernel_version=$(cat "${TMP_DIR}/out/boot/kernel-version")
+		log info "Installing kernel version: ${kernel_version}"
+	fi
+}
+
+install_kernel_files() {
+	log info "Installing kernel files..."
+
+	# 1. Install kernel image to /boot/firmware/kernel_2712.img
+	local kernel_img_src="${TMP_DIR}/out/boot/Image"
+	if [[ ! -f "${kernel_img_src}" ]]; then
+		kernel_img_src=$(find "${TMP_DIR}/out/boot" -name "*.img" | head -n 1)
+		if [[ -z "${kernel_img_src}" ]]; then
+			log error "Kernel image not found in tarball"
+			exit 1
+		fi
+	fi
+
+	log info "Installing kernel image to ${FIRMWARE_DIR}/${KERNEL_NAME}.img"
+	cp "${kernel_img_src}" "${FIRMWARE_DIR}/${KERNEL_NAME}.img" || {
+		log error "Failed to install kernel image"
+		exit 1
+	}
+
+	# Create symlink for compatibility
+	if [[ -f "${FIRMWARE_DIR}/kernel8.img" ]]; then
+		log info "Removing existing kernel8.img before creating symlink"
+		rm -f "${FIRMWARE_DIR}/kernel8.img" || log warn "Failed to remove existing kernel8.img"
+	fi
+	
+	log info "Creating kernel8.img symlink"
+	cd "${FIRMWARE_DIR}" && ln -sf "${KERNEL_NAME}.img" "kernel8.img" || {
+		log warn "Failed to create kernel8.img symlink, copying file instead"
+		cp -f "${FIRMWARE_DIR}/${KERNEL_NAME}.img" "${FIRMWARE_DIR}/kernel8.img"
+	}
+	cd - > /dev/null
+
+	# 2. Install DTB files to /boot/firmware/
+	log info "Installing DTB files to ${FIRMWARE_DIR}"
+	find "${TMP_DIR}/out/boot" -name "*.dtb" -type f -print0 | while IFS= read -r -d '' dtb_file; do
+		cp -v "${dtb_file}" "${FIRMWARE_DIR}/" || {
+			log error "Failed to install DTB file: ${dtb_file}"
+			exit 1
+		}
+	done
+
+	# 3. Install DTBO (overlay) files to /boot/firmware/overlays
+	log info "Installing overlay files to ${FIRMWARE_OVERLAY_DIR}"
+	mkdir -p "${FIRMWARE_OVERLAY_DIR}"
+	
+	find "${TMP_DIR}/out/boot/overlays" -name "*.dtbo" -type f -print0 2>/dev/null | while IFS= read -r -d '' dtbo_file; do
+		cp -v "${dtbo_file}" "${FIRMWARE_OVERLAY_DIR}/" || {
+			log error "Failed to install overlay file: ${dtbo_file}"
+			exit 1
+		}
+	done
+
+	# Copy README if exists
+	if [[ -f "${TMP_DIR}/out/boot/overlays/README" ]]; then
+		cp "${TMP_DIR}/out/boot/overlays/README" "${FIRMWARE_OVERLAY_DIR}/" || log warn "Failed to copy overlay README"
+	fi
+
+	# 4. Install kernel modules to /lib/modules
+	if [[ -d "${TMP_DIR}/out/lib/modules" ]]; then
+		local module_dirs=$(find "${TMP_DIR}/out/lib/modules" -mindepth 1 -maxdepth 1 -type d)
+		if [[ -n "${module_dirs}" ]]; then
+			log info "Installing kernel modules to ${KERNEL_MODULES_DIR}"
+			cp -a "${module_dirs}" "${KERNEL_MODULES_DIR}/" || {
+				log error "Failed to install kernel modules"
+				exit 1
+			}
+		else
+			log warn "No kernel modules found in tarball"
+		fi
+	else
+		log warn "No modules directory found in tarball"
+	fi
+
+	# Copy kernel version info if available
+	if [[ -f "${TMP_DIR}/out/boot/kernel-version-info" ]]; then
+		log info "Installing kernel version information"
+		cp "${TMP_DIR}/out/boot/kernel-version-info" "${FIRMWARE_DIR}/kernel-version-info" || log warn "Failed to copy kernel version info"
+		cp "${TMP_DIR}/out/boot/kernel-version" "${FIRMWARE_DIR}/kernel-version" 2>/dev/null || true
+	fi
+
+	# Ensure correct permissions
+	log info "Setting correct permissions"
+	chmod 644 "${FIRMWARE_DIR}/${KERNEL_NAME}.img" "${FIRMWARE_DIR}/kernel8.img" 2>/dev/null || true
+	find "${FIRMWARE_DIR}" -name "*.dtb" -type f -exec chmod 644 {} \; 2>/dev/null || true
+	find "${FIRMWARE_OVERLAY_DIR}" -name "*.dtbo" -type f -exec chmod 644 {} \; 2>/dev/null || true
+
+	sync
+	log info "Kernel files installed successfully"
+}
+
+main() {
+	log info "Starting Pamir AI Kernel installation..."
+
+	check_requirements
+	# backup_current_kernel
+	extract_kernel_tarball
+	install_kernel_files
+
+	log info "Installation completed successfully!"
+	log info "To load the new kernel, please reboot your system: sudo reboot"
+}
+
+# Execute main function
+main
