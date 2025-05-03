@@ -179,36 +179,41 @@ install_kernel_files() {
 	}
 
 	# Create symlink for compatibility
-	ln -sf "${KERNEL_NAME}.img" "${FIRMWARE_DIR}/kernel8.img" || log warn "Failed to create kernel8.img symlink"
+	if [[ -f "${FIRMWARE_DIR}/kernel8.img" ]]; then
+		log info "Removing existing kernel8.img before creating symlink"
+		rm -f "${FIRMWARE_DIR}/kernel8.img" || log warn "Failed to remove existing kernel8.img"
+	fi
+	
+	log info "Creating kernel8.img symlink"
+	cd "${FIRMWARE_DIR}" && ln -sf "${KERNEL_NAME}.img" "kernel8.img" || {
+		log warn "Failed to create kernel8.img symlink, copying file instead"
+		cp -f "${FIRMWARE_DIR}/${KERNEL_NAME}.img" "${FIRMWARE_DIR}/kernel8.img"
+	}
+	cd - > /dev/null
 
 	# 2. Install DTB files to /boot/firmware/
-	local dtb_files=$(find "${TMP_DIR}/out/boot" -name "*.dtb")
-	if [[ -n "${dtb_files}" ]]; then
-		log info "Installing DTB files to ${FIRMWARE_DIR}"
-		cp -v "${dtb_files}" "${FIRMWARE_DIR}/" || {
-			log error "Failed to install DTB files"
+	log info "Installing DTB files to ${FIRMWARE_DIR}"
+	find "${TMP_DIR}/out/boot" -name "*.dtb" -type f -print0 | while IFS= read -r -d '' dtb_file; do
+		cp -v "${dtb_file}" "${FIRMWARE_DIR}/" || {
+			log error "Failed to install DTB file: ${dtb_file}"
 			exit 1
 		}
-	else
-		log warn "No DTB files found in tarball"
-	fi
+	done
 
 	# 3. Install DTBO (overlay) files to /boot/firmware/overlays
-	local dtbo_files=$(find "${TMP_DIR}/out/boot/overlays" -name "*.dtbo" 2>/dev/null)
-	if [[ -n "${dtbo_files}" ]]; then
-		log info "Installing overlay files to ${FIRMWARE_OVERLAY_DIR}"
-		mkdir -p "${FIRMWARE_OVERLAY_DIR}"
-		cp -v "${dtbo_files}" "${FIRMWARE_OVERLAY_DIR}/" || {
-			log error "Failed to install overlay files"
+	log info "Installing overlay files to ${FIRMWARE_OVERLAY_DIR}"
+	mkdir -p "${FIRMWARE_OVERLAY_DIR}"
+	
+	find "${TMP_DIR}/out/boot/overlays" -name "*.dtbo" -type f -print0 2>/dev/null | while IFS= read -r -d '' dtbo_file; do
+		cp -v "${dtbo_file}" "${FIRMWARE_OVERLAY_DIR}/" || {
+			log error "Failed to install overlay file: ${dtbo_file}"
 			exit 1
 		}
+	done
 
-		# Copy README if exists
-		if [[ -f "${TMP_DIR}/out/boot/overlays/README" ]]; then
-			cp "${TMP_DIR}/out/boot/overlays/README" "${FIRMWARE_OVERLAY_DIR}/" || log warn "Failed to copy overlay README"
-		fi
-	else
-		log warn "No overlay files found in tarball"
+	# Copy README if exists
+	if [[ -f "${TMP_DIR}/out/boot/overlays/README" ]]; then
+		cp "${TMP_DIR}/out/boot/overlays/README" "${FIRMWARE_OVERLAY_DIR}/" || log warn "Failed to copy overlay README"
 	fi
 
 	# 4. Install kernel modules to /lib/modules
