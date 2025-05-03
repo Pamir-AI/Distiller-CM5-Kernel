@@ -14,7 +14,7 @@ readonly DEFAULT_CROSS_COMPILE="aarch64-linux-gnu-"
 readonly DEFAULT_CONFIG="bcm2712_defconfig"
 readonly DEFAULT_LOCALVERSION="-pamir-ai"
 readonly DEFAULT_OUTPUT_DIR="out"
-readonly DEFAULT_THREADS=$(nproc)
+readonly DEFAULT_THREADS=$(nproc --all)
 
 # Build modes
 readonly MODE_DEFAULT="default" # GCC build
@@ -46,7 +46,6 @@ CCACHE=true
 MENUCONFIG=false
 VERBOSE=false
 TARBALL=true
-INSTALL=false
 SKIP_BUILD=false
 HELP=false
 
@@ -81,7 +80,6 @@ show_help() {
 		  -M, --mrproper          Run make mrproper before building
 		  --no-ccache             Disable ccache
 		  --no-tarball            Don't create tarball
-		  --install               Install modules to output directory
 		  --skip-build            Skip the build process (for testing)
 		  -v, --verbose           Enable verbose output
 		  -h, --help              Show this help message
@@ -388,14 +386,9 @@ prepare_env() {
 	log info "Building kernel version: $full_version"
 
 	# Create/clean output directory
-	if [[ ! -d "$OUTPUT_DIR" ]]; then
-		mkdir -p "$OUTPUT_DIR"
-		log info "Created output directory: $OUTPUT_DIR"
-	elif [[ "$CLEAN" == true || "$MRPROPER" == true ]]; then
-		log info "Removing existing output directory: $OUTPUT_DIR"
-		rm -rf "$OUTPUT_DIR"
-		mkdir -p "$OUTPUT_DIR"
-	fi
+	log info "Removing existing output directory: $OUTPUT_DIR"
+	rm -rf "$OUTPUT_DIR"
+	mkdir -p "$OUTPUT_DIR"
 
 	# Clean previous build if requested
 	if [[ "$MRPROPER" == true ]]; then
@@ -485,13 +478,11 @@ build_kernel() {
 }
 
 install_modules() {
-	if [[ "$INSTALL" == true ]]; then
-		log section "Installing modules"
+	log section "Installing modules"
 
-		log info "Installing modules to $OUTPUT_DIR"
-		run_cmd "make ARCH=\"$ARCH\" -j\"$THREADS\" INSTALL_MOD_PATH=\"$OUTPUT_DIR\" modules_install" \
-			"Failed to install modules"
-	fi
+	log info "Installing modules to $OUTPUT_DIR"
+	run_cmd "make ARCH=\"$ARCH\" -j\"$THREADS\" INSTALL_MOD_PATH=\"$OUTPUT_DIR\" modules_install" \
+		"Failed to install modules"
 }
 
 package_output() {
@@ -648,10 +639,6 @@ while [[ $# -gt 0 ]]; do
 		TARBALL=false
 		shift
 		;;
-	--install)
-		INSTALL=true
-		shift
-		;;
 	--skip-build)
 		SKIP_BUILD=true
 		shift
@@ -694,7 +681,6 @@ log info "CCache:         $CCACHE"
 log info "MenuConfig:     $MENUCONFIG"
 log info "Verbose:        $VERBOSE"
 log info "Tarball:        $TARBALL"
-log info "Install:        $INSTALL"
 
 main
 
