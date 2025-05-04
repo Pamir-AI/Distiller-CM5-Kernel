@@ -359,8 +359,8 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	pamir-ai-eink.dtbo \
 	pamir-ai-eink2.dtbo \
 	pamir-ai-soundcard.dtbo \
-	pamir-keyinput-raw.dtbo \
-	pamir-keyinput.dtbo
+	pamir-ai-keyinput-raw.dtbo \
+	pamir-ai-keyinput.dtbo
 
 targets += dtbs dtbs_install
 targets += $(dtbo-y)
