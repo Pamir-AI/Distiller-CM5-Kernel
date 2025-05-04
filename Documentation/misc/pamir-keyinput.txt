@@ -1,0 +1,123 @@
+Pamir AI Key Input Driver with UART TX Capability
+================================================
+
+Overview
+--------
+
+The Pamir AI Key Input Driver (pamir-keyinput.c) is a Linux kernel driver that 
+interfaces with a microcontroller (typically an RP2040) over UART. The driver 
+provides two primary functions:
+
+1. Reading button state information from the microcontroller and converting 
+   it to Linux input events (via the input subsystem)
+   
+2. Transmitting data from userspace to the connected microcontroller via UART
+   (via a character device interface)
+
+This document explains how to integrate and use both functionalities of the driver.
+
+Key Input Functionality
+----------------------
+
+The driver registers an input device that reports KEY_UP, KEY_DOWN, and KEY_ENTER
+events based on the button states received from the microcontroller.
+
+The driver supports debouncing of button inputs to prevent multiple events from
+being triggered due to physical button bounce.
+
+Protocol
+--------
+
+The driver supports two protocol modes for receiving button states:
+
+1. Line-based Protocol (default): Each line contains a decimal number representing 
+   the button state (e.g., "7\n").
+
+2. Raw Protocol: Each byte directly represents a button state. Only values 0-15 
+   (0x00-0x0F) are considered valid button states.
+
+Button state is represented as a bitmask with the following bits:
+- Bit 0 (0x01): BTN_UP_MASK - UP button
+- Bit 1 (0x02): BTN_DOWN_MASK - DOWN button
+- Bit 2 (0x04): BTN_SELECT_MASK - SELECT/ENTER button
+- Bit 3 (0x08): SHUT_DOWN_MASK - POWER/SHUTDOWN button (currently not reported)
+
+Device Tree Configuration
+------------------------
+
+The driver requires the following device tree configuration:
+
+```
+pamir_key_input: pamir-key-input {
+    compatible = "pamir-ai,key-input";
+    status = "okay";
+    
+    /* Optional configurations */
+    debounce-interval-ms = <50>;    /* Default: 50ms */
+    raw-protocol;                   /* Use raw protocol instead of line-based */
+    report-press-only;              /* Only report press events, not release */
+    recovery-timeout-ms = <1000>;   /* Default: 1000ms */
+};
+```
+
+UART TX Functionality
+--------------------
+
+The driver creates a character device `/dev/pamir-uart` that can be used by
+userspace applications to send data to the connected microcontroller via UART.
+This allows bidirectional communication between the Linux system and the
+microcontroller.
+
+Using the UART TX Interface
+--------------------------
+
+The UART TX interface can be used from userspace like any other character device:
+
+```c
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+
+int send_uart_data(const char *message)
+{
+    int fd = open("/dev/pamir-uart", O_WRONLY);
+    if (fd < 0)
+        return -1;
+        
+    ssize_t bytes_written = write(fd, message, strlen(message));
+    
+    close(fd);
+    return bytes_written;
+}
+```
+
+From the command line, you can use tools like `echo` or `cat`:
+
+```bash
+echo -n "command" > /dev/pamir-uart
+cat file.txt > /dev/pamir-uart
+```
+
+Technical Details
+---------------
+
+- The UART is configured at 115200 baud with no flow control
+- The maximum transmission size is limited to 256 bytes per write operation
+- A mutex protects the UART TX operations, ensuring thread safety
+- The driver uses the serdev subsystem for UART communication
+- Input events follow the Linux input subsystem's event reporting standards
+
+Debugging
+--------
+
+The driver includes debug log messages that can be enabled through the kernel's
+dynamic debug facility. To enable debugging:
+
+```bash
+echo 'file pamir-keyinput.c +p' > /sys/kernel/debug/dynamic_debug/control
+```
+
+Licensing
+--------
+
+This driver is licensed under GPL v2. 

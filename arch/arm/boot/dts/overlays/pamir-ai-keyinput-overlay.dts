@@ -23,7 +23,7 @@
 
 			/* Key input driver directly connected to UART2 */
 			pamir_keyinput: pamir-keyinput {
-				compatible = "pamir,key-input";
+				compatible = "pamir-ai,key-input";
 				status = "okay";
 				/* Optional configuration parameters */
 				debounce-interval-ms = <50>;  /* Debounce time in ms */

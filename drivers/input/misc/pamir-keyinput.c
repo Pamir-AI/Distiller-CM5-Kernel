@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * PamirAI Key Input Driver
+ * Pamir AI Key Input Driver
  *
- * Copyright (C) 2025 PamirAI Incorporated - http://www.pamir.ai/
- *	Utsav Balar <utsavbalar1231@gmail.com
+ * Serial device driver for handling button inputs from RP2040 microcontroller
+ * over UART with bidirectional communication support.
+ *
+ * Copyright (C) 2025 Pamir AI Incorporated - http://www.pamir.ai/
+ *
+ * Author: Utsav Balar <utsavbalar1231@gmail.com>
  */
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -15,24 +19,34 @@
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/fs.h>
+#include <linux/cdev.h>
+#include <linux/uaccess.h>
+#include <linux/mutex.h>
 
 #define BUF_SIZE 32
+#define TX_BUF_SIZE 256
+#define DEVICE_NAME "pamir-uart"
+#define MAX_DEVICES 1
 
-// state masks
+/* Button state masks */
 #define BTN_UP_MASK 0b0001
 #define BTN_DOWN_MASK 0b0010
 #define BTN_SELECT_MASK 0b0100
 #define SHUT_DOWN_MASK 0b1000
 
-// default debounce_ms
+/* Default debounce time in milliseconds */
 #define DEFAULT_DEBOUNCE_MS 50
 
 /**
- * struct pamir_key_input_config - configuration for pamir key input
+ * struct pamir_key_input_config - configuration for Pamir key input
  * @debounce_ms: debounce time in milliseconds
  * @raw_protocol: use raw protocol without line parsing
  * @report_press_only: only report key press events, not release
  * @recovery_timeout_ms: timeout for UART recovery
+ *
+ * This struct holds configurable parameters for the Pamir key input driver
+ * that can be set through device tree properties.
  */
 struct pamir_key_input_config {
 	unsigned int debounce_ms;
@@ -42,15 +56,22 @@ struct pamir_key_input_config {
 };
 
 /**
- * struct pamir_key_input_data - private data for pamir key input
+ * struct pamir_key_input_data - private data for Pamir key input
  * @input_dev: pointer to input device
  * @prev_state: previous button state
  * @buf: buffer for receiving data
  * @buf_len: length of the buffer
- * @config: configuration for pamir key input
+ * @config: configuration for Pamir key input
  * @uart_error: flag for UART error
  * @last_receive_jiffies: last time data was received
  * @last_btn_jiffies: last time each button was pressed
+ * @serdev: pointer to serdev device (for TX)
+ * @cdev: character device for TX from userspace
+ * @tx_dev: device number for TX char device
+ * @tx_mutex: mutex for TX operations
+ * @tx_class: device class for TX char device
+ *
+ * This struct holds the runtime state of the Pamir key input driver.
  */
 struct pamir_key_input_data {
 	struct input_dev *input_dev;
@@ -61,15 +82,25 @@ struct pamir_key_input_data {
 	bool uart_error;
 	unsigned long last_receive_jiffies;
 	unsigned long last_btn_jiffies[4];
+
+	/* UART TX functionality */
+	struct serdev_device *serdev;
+	struct cdev cdev;
+	dev_t tx_dev;
+	struct mutex tx_mutex;
+	struct class *tx_class;
 };
 
+/* Global device data pointer for char device operations */
+static struct pamir_key_input_data *g_pamir_data;
+
 /**
- * process_button_state - process the button state received from UART
- * @priv: private data for pamir key input
- * @state: button state received from UART
+ * process_button_state() - Process received button state
+ * @priv: Private device data
+ * @state: Button state received from UART
  *
- * This function processes the button state received from UART and reports
- * the corresponding key events to the input device.
+ * Process the button state received from UART and report key events
+ * to the input subsystem after applying debounce logic.
  */
 static void process_button_state(struct pamir_key_input_data *priv,
 				 unsigned int state)
@@ -82,9 +113,9 @@ static void process_button_state(struct pamir_key_input_data *priv,
 	priv->uart_error = false;
 	priv->last_receive_jiffies = now;
 
-	dev_info(&input_dev->dev,
-		 "Processing button state: 0x%02x (prev: 0x%02x)\n", state,
-		 priv->prev_state);
+	dev_dbg(&input_dev->dev,
+		"Processing button state: 0x%02x (prev: 0x%02x)\n", state,
+		priv->prev_state);
 
 	if (changed & BTN_UP_MASK) {
 		/* Check debounce */
@@ -98,21 +129,18 @@ static void process_button_state(struct pamir_key_input_data *priv,
 			priv->last_btn_jiffies[0] = now;
 			debounced_change = true;
 
-			dev_info(&input_dev->dev, "Button UP %s\n",
-				 pressed ? "pressed" : "released");
+			dev_dbg(&input_dev->dev, "Button UP %s\n",
+				pressed ? "pressed" : "released");
 
 			if (priv->config.report_press_only && !pressed) {
 				/* Immediately report release to ensure key doesn't "stick" */
 				input_sync(input_dev);
 			}
-		} else {
-			dev_info(&input_dev->dev,
-				 "Button UP change ignored (debounce)\n");
 		}
 	}
 
 	if (changed & BTN_DOWN_MASK) {
-		// Check debounce
+		/* Check debounce */
 		if (time_after(now,
 			       priv->last_btn_jiffies[1] +
 				       msecs_to_jiffies(
@@ -123,20 +151,16 @@ static void process_button_state(struct pamir_key_input_data *priv,
 			priv->last_btn_jiffies[1] = now;
 			debounced_change = true;
 
-			dev_info(&input_dev->dev, "Button DOWN %s\n",
-				 pressed ? "pressed" : "released");
+			dev_dbg(&input_dev->dev, "Button DOWN %s\n",
+				pressed ? "pressed" : "released");
 
-			if (priv->config.report_press_only && !pressed) {
+			if (priv->config.report_press_only && !pressed)
 				input_sync(input_dev);
-			}
-		} else {
-			dev_info(&input_dev->dev,
-				 "Button DOWN change ignored (debounce)\n");
 		}
 	}
 
 	if (changed & BTN_SELECT_MASK) {
-		// Check debounce
+		/* Check debounce */
 		if (time_after(now,
 			       priv->last_btn_jiffies[2] +
 				       msecs_to_jiffies(
@@ -147,61 +171,51 @@ static void process_button_state(struct pamir_key_input_data *priv,
 			priv->last_btn_jiffies[2] = now;
 			debounced_change = true;
 
-			dev_info(&input_dev->dev, "Button SELECT %s\n",
-				 pressed ? "pressed" : "released");
+			dev_dbg(&input_dev->dev, "Button SELECT %s\n",
+				pressed ? "pressed" : "released");
 
 			if (priv->config.report_press_only && !pressed)
 				input_sync(input_dev);
-		} else {
-			dev_info(&input_dev->dev,
-				 "Button SELECT change ignored (debounce)\n");
 		}
 	}
 
 	if (changed & SHUT_DOWN_MASK) {
-		// Check debounce
+		/* Check debounce */
 		if (time_after(now,
 			       priv->last_btn_jiffies[3] +
 				       msecs_to_jiffies(
 					       priv->config.debounce_ms))) {
 			bool pressed = (state & SHUT_DOWN_MASK) != 0;
 
-			// input_report_key(input_dev, KEY_POWER, pressed);
+			/* Currently not reporting KEY_POWER events */
 			priv->last_btn_jiffies[3] = now;
 			debounced_change = true;
 
-			dev_info(&input_dev->dev, "Button POWER %s\n",
-				 pressed ? "pressed" : "released");
+			dev_dbg(&input_dev->dev, "Button POWER %s\n",
+				pressed ? "pressed" : "released");
 
 			if (priv->config.report_press_only && !pressed)
 				input_sync(input_dev);
-		} else {
-			dev_info(&input_dev->dev,
-				 "Button POWER change ignored (debounce)\n");
 		}
 	}
 
-	// update if at least 1 btn change
+	/* Update if at least one button changed */
 	if (debounced_change) {
 		input_sync(input_dev);
 		priv->prev_state = state;
-		dev_info(&input_dev->dev, "Button state updated to 0x%02x\n",
-			 priv->prev_state);
-	} else {
-		dev_info(&input_dev->dev, "No debounced button changes\n");
 	}
 }
 
 /**
- * key_input_receive_buf - receive buffer callback for serdev device
- * @serdev: pointer to serdev device
- * @data: pointer to received data
- * @count: number of bytes received
+ * key_input_receive_buf() - Process received UART data
+ * @serdev: Serial device
+ * @data: Received data buffer
+ * @count: Number of bytes received
  *
- * This function processes the received data from the UART and reports
- * the corresponding key events to the input device.
+ * Handle data received from the UART and extract button state information.
+ * Support for both line-based protocol and raw protocol.
  *
- * Return: number of bytes processed
+ * Return: Number of bytes processed
  */
 static size_t key_input_receive_buf(struct serdev_device *serdev,
 				    const unsigned char *data, size_t count)
@@ -209,10 +223,8 @@ static size_t key_input_receive_buf(struct serdev_device *serdev,
 	struct pamir_key_input_data *priv = serdev_device_get_drvdata(serdev);
 	size_t i;
 
-	dev_info(&serdev->dev, "Received %zu bytes from UART\n", count);
-
 	if (priv->config.raw_protocol) {
-		// Each byte is a button state, but only process valid button states
+		/* Each byte is a button state, but only process valid button states */
 		for (i = 0; i < count; i++) {
 			/*
 			 * Filter out ASCII text and only process bytes that could be
@@ -220,23 +232,13 @@ static size_t key_input_receive_buf(struct serdev_device *serdev,
 			 * 4 least significant bits set (at most), representing our buttons.
 			 * This means values should be in range 0-15 (0x00-0x0F).
 			 */
-			if ((data[i] & 0xF0) == 0) {
-				dev_info(
-					&serdev->dev,
-					"Raw protocol: processing valid button state 0x%02x\n",
-					data[i]);
+			if ((data[i] & 0xF0) == 0)
 				process_button_state(priv, data[i]);
-			} else {
-				// This is likely debug text or other non-button data
-				dev_dbg(&serdev->dev,
-					"Raw protocol: ignoring non-button byte 0x%02x\n",
-					data[i]);
-			}
 		}
 		return count;
 	}
 
-	dev_info(&serdev->dev, "Line protocol: processing input\n");
+	/* Text-based protocol: Each line contains a decimal button state */
 	for (i = 0; i < count; i++) {
 		if (priv->buf_len < BUF_SIZE - 1) {
 			priv->buf[priv->buf_len++] = data[i];
@@ -245,24 +247,12 @@ static size_t key_input_receive_buf(struct serdev_device *serdev,
 				priv->buf[priv->buf_len] = '\0';
 				unsigned int state;
 
-				dev_info(&serdev->dev, "Line complete: '%s'\n",
-					 priv->buf);
-
-				if (kstrtouint(priv->buf, 10, &state) == 0) {
-					dev_info(&serdev->dev,
-						 "Parsed state: 0x%02x\n",
-						 state);
+				if (kstrtouint(priv->buf, 10, &state) == 0)
 					process_button_state(priv, state);
-				} else {
-					/* Log invalid input */
-					dev_warn(&serdev->dev,
-						 "Invalid input data: '%s'\n",
-						 priv->buf);
-				}
 				priv->buf_len = 0;
 			}
 		} else {
-			// reset buf on overflow
+			/* Reset buffer on overflow */
 			dev_warn(&serdev->dev,
 				 "Buffer overflow (len=%zu), resetting\n",
 				 priv->buf_len);
@@ -278,42 +268,204 @@ static const struct serdev_device_ops key_input_serdev_ops = {
 };
 
 /**
- * key_input_load_config - load configuration from device tree
- * @node: pointer to device node
- * @config: pointer to pamir key input configuration
+ * key_input_load_config() - Load driver configuration from device tree
+ * @node: Device tree node
+ * @config: Configuration structure to populate
  *
- * This function loads the configuration for pamir key input from the device
- * tree. It sets default values for debounce time, raw protocol, and recovery
- * timeout.
+ * Read device tree properties to configure driver behavior.
  */
 static void key_input_load_config(struct device_node *node,
 				  struct pamir_key_input_config *config)
 {
+	/* Set defaults */
 	config->debounce_ms = DEFAULT_DEBOUNCE_MS;
 	config->raw_protocol = false;
 	config->report_press_only = false;
 	config->recovery_timeout_ms = 1000;
 
+	/* Override with device tree settings if present */
 	of_property_read_u32(node, "debounce-interval-ms",
 			     &config->debounce_ms);
 	of_property_read_u32(node, "recovery-timeout-ms",
 			     &config->recovery_timeout_ms);
 
-	if (of_find_property(node, "raw-protocol", NULL)) {
-		config->raw_protocol =
-			of_property_read_bool(node, "raw-protocol");
-	}
+	config->raw_protocol = of_property_read_bool(node, "raw-protocol");
 	config->report_press_only =
 		of_property_read_bool(node, "report-press-only");
 }
 
+/* Character device operations for UART TX functionality */
+
 /**
- * key_input_probe - probe function for pamir key input driver
- * @serdev: pointer to serdev device
+ * pamir_uart_open() - Open character device
+ * @inode: Inode pointer
+ * @filp: File pointer
  *
- * This function is called when the driver is probed. It initializes the
- * input device, sets up the serdev device, and configures the UART
- * parameters.
+ * Handle open() syscall on the character device.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+static int pamir_uart_open(struct inode *inode, struct file *filp)
+{
+	struct pamir_key_input_data *priv = g_pamir_data;
+
+	if (!priv)
+		return -ENODEV;
+
+	filp->private_data = priv;
+	return 0;
+}
+
+/**
+ * pamir_uart_write() - Write data to UART
+ * @filp: File pointer
+ * @buf: User buffer containing data to send
+ * @count: Number of bytes to send
+ * @ppos: File position pointer (unused)
+ *
+ * Handle write() syscall on the character device to send data to UART.
+ *
+ * Return: Number of bytes sent on success, negative error code on failure
+ */
+static ssize_t pamir_uart_write(struct file *filp, const char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	struct pamir_key_input_data *priv = filp->private_data;
+	char tx_buf[TX_BUF_SIZE];
+	size_t bytes_to_send;
+	int ret;
+
+	if (!priv || !priv->serdev)
+		return -ENODEV;
+
+	bytes_to_send = min_t(size_t, count, TX_BUF_SIZE - 1);
+	if (copy_from_user(tx_buf, buf, bytes_to_send))
+		return -EFAULT;
+
+	mutex_lock(&priv->tx_mutex);
+	ret = serdev_device_write(priv->serdev, tx_buf, bytes_to_send,
+				  MAX_SCHEDULE_TIMEOUT);
+	mutex_unlock(&priv->tx_mutex);
+
+	return ret > 0 ? ret : -EIO;
+}
+
+/**
+ * pamir_uart_release() - Release character device
+ * @inode: Inode pointer
+ * @filp: File pointer
+ *
+ * Handle close() syscall on the character device.
+ *
+ * Return: Always returns 0
+ */
+static int pamir_uart_release(struct inode *inode, struct file *filp)
+{
+	return 0;
+}
+
+/* File operations for character device */
+static const struct file_operations pamir_uart_fops = {
+	.owner = THIS_MODULE,
+	.open = pamir_uart_open,
+	.write = pamir_uart_write,
+	.release = pamir_uart_release,
+};
+
+/**
+ * setup_uart_tx_device() - Set up character device for UART transmit
+ * @priv: Driver's private data
+ *
+ * Create character device node to allow userspace applications to send
+ * data through the UART.
+ *
+ * Return: 0 on success, negative error code on failure
+ */
+static int setup_uart_tx_device(struct pamir_key_input_data *priv)
+{
+	int ret;
+	struct device *device;
+
+	/* Initialize mutex */
+	mutex_init(&priv->tx_mutex);
+
+	/* Allocate device number */
+	ret = alloc_chrdev_region(&priv->tx_dev, 0, 1, DEVICE_NAME);
+	if (ret < 0) {
+		dev_err(&priv->serdev->dev,
+			"Failed to allocate device number: %d\n", ret);
+		return ret;
+	}
+
+	/* Initialize character device */
+	cdev_init(&priv->cdev, &pamir_uart_fops);
+	priv->cdev.owner = THIS_MODULE;
+
+	/* Add character device to system */
+	ret = cdev_add(&priv->cdev, priv->tx_dev, 1);
+	if (ret < 0) {
+		dev_err(&priv->serdev->dev,
+			"Failed to add character device: %d\n", ret);
+		unregister_chrdev_region(priv->tx_dev, 1);
+		return ret;
+	}
+
+	/* Create device class */
+	priv->tx_class = class_create(DEVICE_NAME);
+	if (IS_ERR(priv->tx_class)) {
+		ret = PTR_ERR(priv->tx_class);
+		dev_err(&priv->serdev->dev,
+			"Failed to create device class: %d\n", ret);
+		cdev_del(&priv->cdev);
+		unregister_chrdev_region(priv->tx_dev, 1);
+		return ret;
+	}
+
+	/* Create device node */
+	device = device_create(priv->tx_class, NULL, priv->tx_dev, NULL,
+			       DEVICE_NAME);
+	if (IS_ERR(device)) {
+		ret = PTR_ERR(device);
+		dev_err(&priv->serdev->dev, "Failed to create device: %d\n",
+			ret);
+		class_destroy(priv->tx_class);
+		cdev_del(&priv->cdev);
+		unregister_chrdev_region(priv->tx_dev, 1);
+		return ret;
+	}
+
+	/* Store global data pointer for file operations */
+	g_pamir_data = priv;
+
+	dev_dbg(&priv->serdev->dev, "UART TX char device created: /dev/%s\n",
+		DEVICE_NAME);
+	return 0;
+}
+
+/**
+ * cleanup_uart_tx_device() - Clean up character device resources
+ * @priv: Driver's private data
+ *
+ * Release all resources allocated for the character device.
+ */
+static void cleanup_uart_tx_device(struct pamir_key_input_data *priv)
+{
+	if (priv->tx_class) {
+		device_destroy(priv->tx_class, priv->tx_dev);
+		class_destroy(priv->tx_class);
+	}
+
+	cdev_del(&priv->cdev);
+	unregister_chrdev_region(priv->tx_dev, 1);
+
+	g_pamir_data = NULL;
+}
+
+/**
+ * key_input_probe() - Probe function for Pamir key input driver
+ * @serdev: Serial device
+ *
+ * Initialize hardware, set up input device, and register with the kernel.
  *
  * Return: 0 on success, negative error code on failure
  */
@@ -324,19 +476,13 @@ static int key_input_probe(struct serdev_device *serdev)
 	int ret;
 	int i;
 
-	dev_info(&serdev->dev, "Probing Pamir Key Input driver\n");
-
 	priv = devm_kzalloc(&serdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
 
-	// Load configuration from device tree
+	/* Load configuration from device tree */
 	key_input_load_config(serdev->dev.of_node, &priv->config);
-	dev_info(&serdev->dev,
-		 "Loaded config: debounce=%ums, protocol=%s, recovery=%ums\n",
-		 priv->config.debounce_ms,
-		 priv->config.raw_protocol ? "raw" : "line",
-		 priv->config.recovery_timeout_ms);
 
-	dev_info(&serdev->dev, "Allocating input device\n");
 	input_dev = devm_input_allocate_device(&serdev->dev);
 	if (!input_dev) {
 		dev_err(&serdev->dev, "Failed to allocate input device\n");
@@ -348,11 +494,12 @@ static int key_input_probe(struct serdev_device *serdev)
 	priv->buf_len = 0;
 	priv->uart_error = false;
 	priv->last_receive_jiffies = jiffies;
+	priv->serdev = serdev; /* Store serdev for TX operations */
 
 	for (i = 0; i < 4; i++)
 		priv->last_btn_jiffies[i] = jiffies;
 
-	input_dev->name = "RP2040 Key Input";
+	input_dev->name = "Pamir AI Key Input";
 	input_dev->id.bustype = BUS_RS232;
 	input_dev->id.vendor = 0x0001; /* Generic vendor ID */
 	input_dev->id.product = 0x0001; /* Generic product ID */
@@ -362,65 +509,58 @@ static int key_input_probe(struct serdev_device *serdev)
 	__set_bit(KEY_UP, input_dev->keybit);
 	__set_bit(KEY_DOWN, input_dev->keybit);
 	__set_bit(KEY_ENTER, input_dev->keybit);
-	// __set_bit(KEY_POWER, input_dev->keybit);
+	/* __set_bit(KEY_POWER, input_dev->keybit); */
 
-	dev_info(&serdev->dev, "Registering input device\n");
 	ret = input_register_device(input_dev);
 	if (ret) {
 		dev_err(&serdev->dev, "Failed to register input device: %d\n",
 			ret);
 		return ret;
 	}
-	dev_info(&serdev->dev, "Input device registered successfully\n");
 
-	// Set up serdev
-	dev_info(&serdev->dev, "Setting up Serial Device\n");
 	serdev_device_set_drvdata(serdev, priv);
 	serdev_device_set_client_ops(serdev, &key_input_serdev_ops);
 
-	dev_info(&serdev->dev, "Opening Serial Device\n");
 	ret = serdev_device_open(serdev);
 	if (ret) {
 		dev_err(&serdev->dev, "Failed to open serdev: %d\n", ret);
 		input_unregister_device(input_dev);
 		return ret;
 	}
-	dev_info(&serdev->dev, "Serial device opened successfully\n");
 
-	// uart
-	dev_info(&serdev->dev, "Configuring UART parameters\n");
 	serdev_device_set_baudrate(serdev, 115200);
 	serdev_device_set_flow_control(serdev, false);
 
-	dev_info(&serdev->dev, "Key input driver initialized and ready\n");
+	ret = setup_uart_tx_device(priv);
+	if (ret < 0) {
+		dev_err(&serdev->dev, "Failed to set up UART TX device: %d\n",
+			ret);
+		serdev_device_close(serdev);
+		input_unregister_device(input_dev);
+		return ret;
+	}
+
 	return 0;
 }
 
 /**
- * key_input_remove - remove function for pamir key input driver
- * @serdev: pointer to serdev device
+ * key_input_remove() - Remove function for Pamir key input driver
+ * @serdev: Serial device
  *
- * This function is called when the driver is removed. It unregisters the
- * input device and closes the serdev device.
+ * Clean up resources when the driver is unloaded.
  */
 static void key_input_remove(struct serdev_device *serdev)
 {
 	struct pamir_key_input_data *priv = serdev_device_get_drvdata(serdev);
 
-	dev_info(&serdev->dev, "Removing Pamir Key Input driver\n");
-
-	dev_info(&serdev->dev, "Closing Serial Device\n");
+	cleanup_uart_tx_device(priv);
 	serdev_device_close(serdev);
-
-	dev_info(&serdev->dev, "Unregistering input device\n");
 	input_unregister_device(priv->input_dev);
-
-	dev_info(&serdev->dev, "Driver removed successfully\n");
 }
 
 #ifdef CONFIG_OF
 static const struct of_device_id key_input_of_match[] = {
-	{ .compatible = "pamir,key-input" },
+	{ .compatible = "pamir-ai,key-input" },
 	{}
 };
 
@@ -440,5 +580,5 @@ module_serdev_device_driver(key_input_driver);
 
 MODULE_ALIAS("serdev:pamir_key_input");
 MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("PamirAI Inc.");
-MODULE_DESCRIPTION("Kernel driver for RP2040 key input via UART");
+MODULE_AUTHOR("Pamir AI Inc.");
+MODULE_DESCRIPTION("Kernel driver for Pamir AI key input via UART");
