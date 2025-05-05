@@ -422,6 +422,102 @@ static int pamir_ai_sound_get_input_gain(struct pamir_ai_sound_data *data)
 	return 0;
 }
 
+/**
+ * register_access_show - read a register from the codec
+ * @dev: device structure
+ * @attr: device attribute
+ * @buf: buffer to write the register value to
+ *
+ * This function allows userspace to read a register from the codec.
+ * The format is "page reg" (e.g., "0 53" to read page 0 register 0x53).
+ *
+ * Return: number of bytes written to buffer, or negative error code
+ */
+static ssize_t register_access_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct pamir_ai_sound_data *data = dev_get_drvdata(dev);
+	int page, reg, value;
+	int ret;
+
+	/* Get last page and reg from the previous write */
+	if (sscanf(buf, "%d %d", &page, &reg) != 2) {
+		dev_err(dev, "Invalid format. Use: 'page reg'\n");
+		return -EINVAL;
+	}
+
+	if (page < 0 || page > 255 || reg < 0 || reg > 255) {
+		dev_err(dev, "Invalid page or register value (0-255)\n");
+		return -EINVAL;
+	}
+
+	/* First select the page */
+	ret = i2c_smbus_write_byte_data(data->client, 0x00, page);
+	if (ret < 0) {
+		dev_err(dev, "Failed to select page %d: %d\n", page, ret);
+		return ret;
+	}
+
+	/* Then read the register */
+	value = i2c_smbus_read_byte_data(data->client, reg);
+	if (value < 0) {
+		dev_err(dev, "Failed to read register 0x%02x: %d\n", reg, value);
+		return value;
+	}
+
+	dev_info(dev, "Read page %d reg 0x%02x: 0x%02x\n", page, reg, value);
+	return sprintf(buf, "%d\n", value);
+}
+
+/**
+ * register_access_store - write to a register of the codec
+ * @dev: device structure
+ * @attr: device attribute
+ * @buf: buffer containing the register and value to write
+ * @count: number of bytes in the buffer
+ *
+ * This function allows userspace to write to a register of the codec.
+ * The format is "page reg value" (e.g., "0 41 0" to write 0 to page 0 register 0x41).
+ *
+ * Return: number of bytes processed, or negative error code
+ */
+static ssize_t register_access_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct pamir_ai_sound_data *data = dev_get_drvdata(dev);
+	int page, reg, value;
+	int ret;
+
+	if (sscanf(buf, "%d %d %d", &page, &reg, &value) != 3) {
+		dev_err(dev, "Invalid format. Use: 'page reg value'\n");
+		return -EINVAL;
+	}
+
+	if (page < 0 || page > 255 || reg < 0 || reg > 255 || value < 0 || value > 255) {
+		dev_err(dev, "Invalid parameter(s), valid range is 0-255\n");
+		return -EINVAL;
+	}
+
+	/* First select the page */
+	ret = i2c_smbus_write_byte_data(data->client, 0x00, page);
+	if (ret < 0) {
+		dev_err(dev, "Failed to select page %d: %d\n", page, ret);
+		return ret;
+	}
+
+	/* Then write to the register */
+	ret = i2c_smbus_write_byte_data(data->client, reg, value);
+	if (ret < 0) {
+		dev_err(dev, "Failed to write 0x%02x to page %d reg 0x%02x: %d\n",
+			value, page, reg, ret);
+		return ret;
+	}
+
+	dev_info(dev, "Wrote 0x%02x to page %d reg 0x%02x\n", value, page, reg);
+	return count;
+}
+
 static ssize_t volume_level_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
@@ -500,10 +596,12 @@ static ssize_t input_gain_store(struct device *dev,
 
 static DEVICE_ATTR_RW(volume_level);
 static DEVICE_ATTR_RW(input_gain);
+static DEVICE_ATTR_RW(register_access);
 
 static struct attribute *pamir_ai_sound_attrs[] = {
 	&dev_attr_volume_level.attr,
 	&dev_attr_input_gain.attr,
+	&dev_attr_register_access.attr,
 	NULL,
 };
 
