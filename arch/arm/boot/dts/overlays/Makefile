@@ -197,6 +197,7 @@ dtbo-$(CONFIG_ARCH_BCM2835) += \
 	ov9281.dtbo \
 	pamir-ai-soundcard.dtbo \
 	pamir-ai-keyinput.dtbo \
+	pamir-ai-sam.dtbo \
 	papirus.dtbo \
 	pca953x.dtbo \
 	pcf857x.dtbo \

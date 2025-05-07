@@ -1,0 +1,12 @@
+config PAMIR_AI_SAM_MODULE
+	tristate "Pamir AI Sensor and Actuator Module (SAM) driver"
+	depends on SERIAL_DEV_BUS
+	help
+	  Say Y here to support Pamir AI's Sensor and Actuator Module (SAM)
+	  for communication between the host processor and RP2040 microcontroller.
+	  
+	  This driver interfaces with hardware components on the CM5 device,
+	  specifically handling button inputs and RGB LED control via UART.
+	  
+	  To compile this driver as a module, choose M here: the module
+	  will be called pamir-ai-sam. 
