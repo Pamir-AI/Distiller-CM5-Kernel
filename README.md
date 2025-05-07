@@ -28,3 +28,38 @@ Build status for rpi-6.6.y:
 Build status for rpi-6.12.y:
 [![Pi kernel build tests](https://github.com/raspberrypi/linux/actions/workflows/kernel-build.yml/badge.svg?branch=rpi-6.12.y)](https://github.com/raspberrypi/linux/actions/workflows/kernel-build.yml)
 [![dtoverlaycheck](https://github.com/raspberrypi/linux/actions/workflows/dtoverlaycheck.yml/badge.svg?branch=rpi-6.12.y)](https://github.com/raspberrypi/linux/actions/workflows/dtoverlaycheck.yml)
+
+Pamir AI Kernel
+==============
+
+This is the Pamir AI optimized kernel for Raspberry Pi CM5 and Distiller. It includes enhancements for performance and support for Pamir AI hardware.
+
+## Build Status
+
+[![Kernel Release CI](https://github.com/Pamir-AI/Distiller-CM5-Kernel/actions/workflows/kernel-release.yml/badge.svg)](https://github.com/Pamir-AI/Distiller-CM5-Kernel/actions/workflows/kernel-release.yml)
+
+## Building the Kernel
+
+The Pamir AI kernel can be built using our custom build script:
+
+```bash
+# Build with default settings (GCC)
+./scripts/kernel-build
+
+# Build with LTO optimization (recommended)
+./scripts/kernel-build --mode lto
+
+# View all build options
+./scripts/kernel-build --help
+```
+
+## Continuous Integration
+
+We use GitHub Actions for automated builds and releases:
+
+1. **Kernel Release CI**: Builds and releases kernel packages automatically
+   - Runs on manual trigger from the Actions tab
+   - Scheduled weekly builds (Mondays at 2:00 AM UTC)
+   - LTO mode enabled by default for optimal performance
+
+For more information about our CI setup, see [.github/workflows/README.md](.github/workflows/README.md).

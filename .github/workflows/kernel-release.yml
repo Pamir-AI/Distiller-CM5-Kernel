@@ -1,0 +1,160 @@
+name: Kernel Release CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: 'Build mode'
+        required: true
+        default: 'lto'
+        type: 'choice'
+        options:
+          - 'default'
+          - 'llvm'
+          - 'lto'
+          - 'pgo-gen'
+          - 'pgo-use'
+      clean:
+        description: 'Run make clean before building'
+        required: false
+        default: true
+        type: 'boolean'
+      custom_tag:
+        description: 'Custom tag (leave empty for auto-generation)'
+        required: false
+        default: ''
+        type: 'string'
+      version_suffix:
+        description: 'Custom version suffix'
+        required: false
+        default: ''
+        type: 'string'
+      draft:
+        description: 'Create as draft release'
+        required: false
+        default: false
+        type: 'boolean'
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: false
+        type: 'boolean'
+      changelog:
+        description: 'Changelog text for this release'
+        required: false
+        default: ''
+        type: 'string'
+  # Weekly build on Monday at 2:00 AM UTC
+  schedule:
+    - cron: '0 2 * * 1'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for creating releases
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tags and branches
+
+      - name: Set default inputs for scheduled runs
+        if: github.event_name == 'schedule'
+        run: |
+          echo "SCHEDULED_BUILD=true" >> $GITHUB_ENV
+          echo "BUILD_MODE=lto" >> $GITHUB_ENV
+          echo "CLEAN_BUILD=true" >> $GITHUB_ENV
+          echo "VERSION_SUFFIX=weekly" >> $GITHUB_ENV
+          echo "IS_PRERELEASE=true" >> $GITHUB_ENV
+          echo "CHANGELOG_TEXT=Weekly automated build $(date '+%Y-%m-%d')" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu ccache
+          sudo apt-get install -y clang lld llvm llvm-dev
+          sudo apt-get install -y bison flex libssl-dev libelf-dev
+          
+      - name: Install GitHub CLI
+        run: |
+          type -p curl >/dev/null || sudo apt install curl -y
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
+      
+      - name: Get latest release tag
+        id: get_latest_tag
+        run: |
+          # Get the latest tag or set a default if none exists
+          LATEST_TAG=$(gh release list --repo ${{ github.repository }} --limit 1 | grep -oP '^v\d{8}-.*?(?=\s)' || echo "v00000000-initial")
+          echo "Latest tag: $LATEST_TAG"
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+          
+          # Extract kernel version from the latest tag (if possible)
+          if [[ "$LATEST_TAG" =~ -([0-9]+\.[0-9]+\.[0-9]+)- ]]; then
+            KERNEL_VERSION="${BASH_REMATCH[1]}"
+            echo "Extracted kernel version: $KERNEL_VERSION"
+            echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          fi
+      
+      - name: Build kernel
+        run: |
+          # Make scripts executable
+          chmod +x scripts/kernel-build
+          
+          # Set clean option based on input or scheduled default
+          CLEAN_OPTION=""
+          if [ "${{ inputs.clean }}" == "true" ] || [ "$CLEAN_BUILD" == "true" ]; then
+            CLEAN_OPTION="--clean"
+          fi
+          
+          # Build kernel with LTO mode by default or selected mode
+          BUILD_MODE="${{ inputs.build_mode || env.BUILD_MODE || 'lto' }}"
+          
+          # Set version suffix if provided
+          VERSION_SUFFIX_OPTION=""
+          if [ -n "${{ inputs.version_suffix }}" ]; then
+            VERSION_SUFFIX_OPTION="--version-suffix ${{ inputs.version_suffix }}"
+          elif [ -n "$VERSION_SUFFIX" ]; then
+            VERSION_SUFFIX_OPTION="--version-suffix $VERSION_SUFFIX"
+          fi
+          
+          ./scripts/kernel-build --mode $BUILD_MODE -v $CLEAN_OPTION $VERSION_SUFFIX_OPTION
+      
+      - name: Create GitHub release
+        run: |
+          # Make release script executable
+          chmod +x scripts/release-to-github
+          
+          # Set draft and prerelease options based on inputs or scheduled defaults
+          DRAFT_OPTION=""
+          if [ "${{ inputs.draft }}" == "true" ]; then
+            DRAFT_OPTION="--draft"
+          fi
+          
+          PRERELEASE_OPTION=""
+          if [ "${{ inputs.prerelease }}" == "true" ] || [ "$IS_PRERELEASE" == "true" ]; then
+            PRERELEASE_OPTION="--prerelease"
+          fi
+          
+          # Set changelog if provided
+          CHANGELOG_OPTION=""
+          if [ -n "${{ inputs.changelog }}" ]; then
+            echo "${{ inputs.changelog }}" > CHANGELOG.md
+            CHANGELOG_OPTION="--changelog CHANGELOG.md"
+          elif [ -n "$CHANGELOG_TEXT" ]; then
+            echo "$CHANGELOG_TEXT" > CHANGELOG.md
+            CHANGELOG_OPTION="--changelog CHANGELOG.md"
+          fi
+          
+          # Set custom tag if provided
+          TAG_OPTION=""
+          if [ -n "${{ inputs.custom_tag }}" ]; then
+            TAG_OPTION="--tag ${{ inputs.custom_tag }}"
+          fi
+          
+          # Run release script
+          ./scripts/release-to-github $DRAFT_OPTION $PRERELEASE_OPTION $CHANGELOG_OPTION $TAG_OPTION 
