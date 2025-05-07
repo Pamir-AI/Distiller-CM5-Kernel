@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Device Tree overlay for Pamir Key Input via serial
+ * Uses UART2 (ttyAMA2) for communication with RP2040
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/bcm2835.h>
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	/* This fragment enables UART2 and directly adds our driver to it */
+	fragment@0 {
+		target = <&uart2>;
+		__overlay__ {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&uart2_pins>;
+
+			/* Key input driver directly connected to UART2 */
+			pamir_keyinput: pamir-keyinput {
+				compatible = "pamir,key-input";
+				status = "okay";
+				/* Optional configuration parameters */
+				debounce-interval-ms = <50>;  /* Debounce time in ms */
+				raw-protocol;                 /* Enable raw byte protocol */
+				recovery-timeout-ms = <1000>; /* UART recovery timeout */
+			};
+		};
+	};
+
+	/* Configure UART2 pins */
+	fragment@1 {
+		target = <&gpio>;
+		__overlay__ {
+			uart2_pins: uart2_pins {
+				brcm,pins = <4 5>; /* TX on GPIO4, RX on GPIO5 */
+				brcm,function = <BCM2835_FSEL_ALT4 BCM2835_FSEL_ALT4>;
+				brcm,pull = <BCM2835_PUD_OFF BCM2835_PUD_UP>;
+			};
+		};
+	};
+
+	__overrides__ {
+		debounce = <&pamir_keyinput>,"debounce-interval-ms:0";
+		raw_protocol = <&pamir_keyinput>,"raw-protocol?";
+		report_press_only = <&pamir_keyinput>,"report-press-only?";
+		recovery_timeout = <&pamir_keyinput>,"recovery-timeout-ms:0";
+	};
+}; 
