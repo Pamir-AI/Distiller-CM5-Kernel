@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Device Tree overlay for Pamir AI SAM Module
+ *
+ * Copyright (C) 2025 Pamir AI Incorporated.
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/bcm2835.h>
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&uart0>;
+		__overlay__ {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&uart0_pins>;
+		};
+	};
+
+	fragment@1 {
+		target = <&uart0>;
+		__overlay__ {
+			pamir_ai_sam: pamir-ai-sam {
+				compatible = "pamir-ai,sam";
+				status = "okay";
+				debug-level = <1>;
+				recovery-timeout-ms = <1000>;
+				ack-required;
+			};
+		};
+	};
+
+	/* Configure UART2 pins */
+	fragment@2 {
+		target = <&gpio>;
+		__overlay__ {
+			uart2_pins: uart2_pins {
+				brcm,pins = <4 5>; /* TX on GPIO4, RX on GPIO5 */
+				brcm,function = <BCM2835_FSEL_ALT4 BCM2835_FSEL_ALT4>;
+				brcm,pull = <BCM2835_PUD_OFF BCM2835_PUD_UP>;
+			};
+		};
+	};
+
+	__overrides__ {
+		debug_level = <&pamir_ai_sam>,"debug-level:0";
+		recovery_timeout = <&pamir_ai_sam>,"recovery-timeout-ms:0";
+		ack_required = <&pamir_ai_sam>,"ack-required?";
+	};
+}; 
