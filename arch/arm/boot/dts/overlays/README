@@ -3673,6 +3673,54 @@ Params: rotation                Mounting rotation of the camera sensor (0 or
                                 Appears not to work on Pi3.
 
 
+Name:   pamir-ai-keyinput
+Info:   Enables key input functionality via UART2 (ttyAMA2) connected to an
+        RP2040 microcontroller for Pamir AI devices.
+        NOTE: Requires the uart2 overlay to be loaded first.
+Load:   dtoverlay=pamir-ai-keyinput,<param>=<val>
+Params:
+        debounce                Debounce time in milliseconds for key presses
+                                (default 50)
+
+        raw_protocol            Enable raw byte protocol mode for communication
+                                (default off)
+
+        report_press_only       Only report key press events, not releases
+                                (default off)
+
+        recovery_timeout        Timeout in milliseconds for UART communication
+                                recovery (default 1000)
+
+
+Name:   pamir-ai-sam
+Info:   Enables the Sensor and Actuator Module (SAM) functionality via UART0
+        connected to an RP2040 microcontroller for Pamir AI CM5 devices.
+Load:   dtoverlay=pamir-ai-sam,<param>=<val>
+Params:
+        debug_level             Debug verbosity level (0-3)
+                                0: No debug messages
+                                1: Basic operational messages (default)
+                                2: Detailed debug information
+                                3: Verbose debugging including packet dumps
+
+        recovery_timeout        Timeout in milliseconds for UART communication
+                                recovery (default 1000)
+
+        ack_required            Require acknowledgement packets for each
+                                command sent (default off)
+
+
+Name:   pamir-ai-soundcard
+Info:   Enables audio support for Pamir AI devices with a dummy sound card
+        driver that works with the Raspberry Pi I2S interface and an
+        I2C-connected audio codec.
+
+        Provides stereo playback and capture capabilities with support for
+        48kHz and 96kHz sample rates, and 16/24/32-bit sample formats.
+Load:   dtoverlay=pamir-ai-soundcard
+Params: <None>
+
+
 Name:   papirus
 Info:   PaPiRus ePaper Screen by Pi Supply (both HAT and pHAT)
 Load:   dtoverlay=papirus,<param>=<val>
