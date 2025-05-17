@@ -12,19 +12,19 @@
 #include <dt-bindings/pinctrl/bcm2835.h>
 
 / {
-	compatible = "brcm,bcm2835";
+	compatible = "brcm,bcm2712";
 
 	fragment@0 {
-		target = <&uart0>;
+		target = <&uart2>;
 		__overlay__ {
 			status = "okay";
 			pinctrl-names = "default";
-			pinctrl-0 = <&uart0_pins>;
+			pinctrl-0 = <&uart2_pins>;
 		};
 	};
 
 	fragment@1 {
-		target = <&uart0>;
+		target = <&uart2>;
 		__overlay__ {
 			pamir_ai_sam: pamir-ai-sam {
 				compatible = "pamir-ai,sam";

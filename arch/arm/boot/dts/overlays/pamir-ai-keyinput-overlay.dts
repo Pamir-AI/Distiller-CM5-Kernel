@@ -11,21 +11,23 @@
 #include <dt-bindings/pinctrl/bcm2835.h>
 
 / {
-	compatible = "brcm,bcm2835";
+	compatible = "brcm,bcm2712";
 
-	/* This fragment enables UART2 and directly adds our driver to it */
 	fragment@0 {
 		target = <&uart2>;
 		__overlay__ {
 			status = "okay";
 			pinctrl-names = "default";
 			pinctrl-0 = <&uart2_pins>;
+		};
+	};
 
-			/* Key input driver directly connected to UART2 */
+	fragment@1 {
+		target = <&uart2>;
+		__overlay__ {
 			pamir_keyinput: pamir-keyinput {
 				compatible = "pamir,key-input";
 				status = "okay";
-				/* Optional configuration parameters */
 				debounce-interval-ms = <50>;  /* Debounce time in ms */
 				raw-protocol;                 /* Enable raw byte protocol */
 				recovery-timeout-ms = <1000>; /* UART recovery timeout */
@@ -34,7 +36,7 @@
 	};
 
 	/* Configure UART2 pins */
-	fragment@1 {
+	fragment@2 {
 		target = <&gpio>;
 		__overlay__ {
 			uart2_pins: uart2_pins {
