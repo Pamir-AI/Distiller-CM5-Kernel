@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/pamir-ai-keyinput.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Pamir AI Key Input Device Tree Bindings
+
+maintainers:
+  - Utsav Balar <utsavbalar1231@gmail.com>
+
+description: |
+  This binding describes the Pamir AI Key Input overlay which enables a
+  key input device connected via UART2 (ttyAMA2) to a RP2040 microcontroller.
+  The key input device provides keyboard functionality for Pamir AI devices.
+
+properties:
+  compatible:
+    const: pamir,key-input
+
+  status:
+    enum:
+      - okay
+      - disabled
+
+  debounce-interval-ms:
+    type: integer
+    default: 50
+    description: Debounce time in milliseconds for key presses
+
+  raw-protocol:
+    type: boolean
+    description: Enable raw byte protocol mode for communication
+
+  report-press-only:
+    type: boolean
+    description: Only report key press events, not releases
+
+  recovery-timeout-ms:
+    type: integer
+    default: 1000
+    description: Timeout in milliseconds for UART communication recovery
+
+required:
+  - compatible
+  - status
+
+additionalProperties: false
+
+examples:
+  - |
+    / {
+      fragment@0 {
+        target = <&uart2>;
+        __overlay__ {
+          status = "okay";
+          pinctrl-names = "default";
+          pinctrl-0 = <&uart2_pins>;
+
+          pamir_keyinput: pamir-keyinput {
+            compatible = "pamir,key-input";
+            status = "okay";
+            debounce-interval-ms = <50>;
+            raw-protocol;
+            recovery-timeout-ms = <1000>;
+          };
+        };
+      };
+    }; 
