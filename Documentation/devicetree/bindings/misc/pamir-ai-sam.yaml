@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/pamir-ai-sam.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Pamir AI Sensor and Actuator Module (SAM) Device Tree Bindings
+
+maintainers:
+  - Utsav Balar <utsavbalar1231@gmail.com>
+
+description: |
+  This binding describes the Pamir AI Sensor and Actuator Module (SAM) overlay which
+  enables communication between the host processor and an RP2040 microcontroller
+  providing interface to sensor inputs and actuator outputs on CM5 devices.
+  
+  The SAM module communicates over UART and provides an input interface for buttons,
+  as well as LED control functionality. It also provides a character device interface
+  for user-space applications.
+
+properties:
+  compatible:
+    const: pamir-ai,sam
+
+  status:
+    enum:
+      - okay
+      - disabled
+
+  debug-level:
+    type: integer
+    default: 1
+    description: |
+      Debug verbosity level:
+      0 - No debug messages
+      1 - Basic operational messages
+      2 - Detailed debug information
+      3 - Very verbose debugging including packet dumps
+
+  recovery-timeout-ms:
+    type: integer
+    default: 1000
+    description: Timeout in milliseconds for UART communication recovery
+
+  ack-required:
+    type: boolean
+    description: Require acknowledgement packets for each command sent
+
+required:
+  - compatible
+  - status
+
+additionalProperties: false
+
+examples:
+  - |
+    / {
+      fragment@0 {
+        target = <&uart0>;
+        __overlay__ {
+          status = "okay";
+          pinctrl-names = "default";
+          pinctrl-0 = <&uart0_pins>;
+        };
+      };
+
+      fragment@1 {
+        target = <&uart0>;
+        __overlay__ {
+          pamir_ai_sam: pamir-ai-sam {
+            compatible = "pamir-ai,sam";
+            status = "okay";
+            debug-level = <1>;
+            recovery-timeout-ms = <1000>;
+            ack-required;
+          };
+        };
+      };
+    }; 
